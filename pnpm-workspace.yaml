@@ -1,0 +1,6 @@
+packages:
+  - packages/*
+  - apps/*
+allowBuilds:
+  node-pty: true
+  esbuild: true

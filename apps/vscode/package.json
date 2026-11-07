@@ -1,0 +1,495 @@
+{
+  "name": "infinity-harness",
+  "displayName": "Infinity Harness",
+  "description": "Plan, watch and land the work of every coding agent on this machine from the workspace you have open.",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "publisher": "infinity-harness",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "agents",
+    "kanban",
+    "orchestrator",
+    "claude",
+    "codex"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --sourcemap --outfile=dist/extension.cjs",
+    "watch": "pnpm build --watch",
+    "typecheck": "tsc -p tsconfig.json",
+    "package": "pnpm build && npx --yes @vscode/vsce@3 package --no-dependencies --skip-license -o dist/infinity-harness.vsix",
+    "install-local": "pnpm package && code --install-extension dist/infinity-harness.vsix --force",
+    "icon": "node scripts/make-icon.mjs",
+    "publish:marketplace": "npx --yes @vscode/vsce@3 publish --no-dependencies --skip-license --packagePath dist/infinity-harness.vsix",
+    "publish:openvsx": "npx --yes ovsx@0.10 publish dist/infinity-harness.vsix"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "infinityHarness",
+          "title": "Infinity Harness",
+          "icon": "media/infinity.svg"
+        }
+      ]
+    },
+    "views": {
+      "infinityHarness": [
+        {
+          "id": "infinityHarness.chat",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "infinityHarness.cards",
+          "name": "Cards"
+        },
+        {
+          "id": "infinityHarness.attention",
+          "name": "Needs you"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "infinityHarness.cards",
+        "contents": "The Infinity Harness daemon isn't reachable at the configured address.\n[Start daemon](command:infinityHarness.startDaemon)\n[Retry](command:infinityHarness.refresh)\nSet `infinityHarness.installPath` to your Infinity Harness checkout so the extension can start it, or change `infinityHarness.daemonUrl`.",
+        "when": "infinityHarness.state == offline"
+      },
+      {
+        "view": "infinityHarness.cards",
+        "contents": "Open a folder to plan work on it.",
+        "when": "infinityHarness.state == noFolder"
+      },
+      {
+        "view": "infinityHarness.cards",
+        "contents": "This workspace has no board yet. A board runs agents on this repository, each card in its own worktree and branch.\n[Create board](command:infinityHarness.createBoard)",
+        "when": "infinityHarness.state == noBoard"
+      },
+      {
+        "view": "infinityHarness.cards",
+        "contents": "No cards yet. Describe a goal and the orchestrator splits it into cards for your agents.\n[Plan a goal](command:infinityHarness.plan)",
+        "when": "infinityHarness.state == ready"
+      }
+    ],
+    "commands": [
+      {
+        "command": "infinityHarness.plan",
+        "title": "Plan a Goal…",
+        "category": "Infinity Harness",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "infinityHarness.planFromSelection",
+        "title": "Plan a Goal About the Selection…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.fixProblems",
+        "title": "Plan a Fix for This File's Problems",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.openBoard",
+        "title": "Open Board",
+        "category": "Infinity Harness",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "infinityHarness.refresh",
+        "title": "Refresh",
+        "category": "Infinity Harness",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "infinityHarness.startDaemon",
+        "title": "Start Daemon",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.createBoard",
+        "title": "Create Board for This Workspace",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.selectBoard",
+        "title": "Switch Board…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.openCard",
+        "title": "Open Card",
+        "category": "Infinity Harness",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "infinityHarness.showChanges",
+        "title": "Show Changes",
+        "category": "Infinity Harness",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "infinityHarness.openTerminal",
+        "title": "Attach Terminal",
+        "category": "Infinity Harness",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "infinityHarness.messageCard",
+        "title": "Message Agent…",
+        "category": "Infinity Harness",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "infinityHarness.sendSelection",
+        "title": "Send Selection to a Card's Agent…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.runCard",
+        "title": "Run on Best Agent",
+        "category": "Infinity Harness",
+        "icon": "$(play)"
+      },
+      {
+        "command": "infinityHarness.cancelCard",
+        "title": "Stop Agent",
+        "category": "Infinity Harness",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "infinityHarness.openWorktree",
+        "title": "Open Worktree in New Window",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.weighBlock",
+        "title": "Weigh Block…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.approve",
+        "title": "Approve Card",
+        "category": "Infinity Harness",
+        "icon": "$(check)"
+      },
+      {
+        "command": "infinityHarness.requestChanges",
+        "title": "Request Changes…",
+        "category": "Infinity Harness",
+        "icon": "$(request-changes)"
+      },
+      {
+        "command": "infinityHarness.reviewComment",
+        "title": "Add Review Comment",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.landNow",
+        "title": "Land Now",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.tryCheckout",
+        "title": "Try Locally: Check Out the Branch",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.tryApply",
+        "title": "Try Locally: Apply the Diff to My Working Tree",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.decideApproval",
+        "title": "Decide Request…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.approveApproval",
+        "title": "Approve Request",
+        "category": "Infinity Harness",
+        "icon": "$(check)"
+      },
+      {
+        "command": "infinityHarness.denyApproval",
+        "title": "Deny Request",
+        "category": "Infinity Harness",
+        "icon": "$(close)"
+      },
+      {
+        "command": "infinityHarness.chat.selectGoal",
+        "title": "Chat: Pick a Goal…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.openChat",
+        "title": "Open Chat",
+        "category": "Infinity Harness",
+        "icon": "$(comment-discussion)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "infinityHarness.plan",
+          "when": "view == infinityHarness.cards && infinityHarness.state == ready",
+          "group": "navigation@1"
+        },
+        {
+          "command": "infinityHarness.openBoard",
+          "when": "view == infinityHarness.cards && infinityHarness.state == ready",
+          "group": "navigation@2"
+        },
+        {
+          "command": "infinityHarness.refresh",
+          "when": "view == infinityHarness.cards",
+          "group": "navigation@3"
+        },
+        {
+          "command": "infinityHarness.selectBoard",
+          "when": "view == infinityHarness.cards && infinityHarness.state == ready",
+          "group": "1_board"
+        },
+        {
+          "command": "infinityHarness.chat.selectGoal",
+          "when": "view == infinityHarness.chat",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "infinityHarness.showChanges",
+          "when": "view == infinityHarness.cards && viewItem =~ /branch/",
+          "group": "inline@1"
+        },
+        {
+          "command": "infinityHarness.openTerminal",
+          "when": "view == infinityHarness.cards && viewItem =~ /terminal/",
+          "group": "inline@2"
+        },
+        {
+          "command": "infinityHarness.messageCard",
+          "when": "view == infinityHarness.cards && viewItem =~ /card/",
+          "group": "inline@3"
+        },
+        {
+          "command": "infinityHarness.openCard",
+          "when": "view == infinityHarness.cards && viewItem =~ /card/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "infinityHarness.showChanges",
+          "when": "view == infinityHarness.cards && viewItem =~ /branch/",
+          "group": "1_open@2"
+        },
+        {
+          "command": "infinityHarness.openWorktree",
+          "when": "view == infinityHarness.cards && viewItem =~ /worktree/",
+          "group": "1_open@3"
+        },
+        {
+          "command": "infinityHarness.messageCard",
+          "when": "view == infinityHarness.cards && viewItem =~ /card/",
+          "group": "2_agent@1"
+        },
+        {
+          "command": "infinityHarness.openTerminal",
+          "when": "view == infinityHarness.cards && viewItem =~ /terminal/",
+          "group": "2_agent@2"
+        },
+        {
+          "command": "infinityHarness.runCard",
+          "when": "view == infinityHarness.cards && viewItem =~ /runnable/",
+          "group": "2_agent@3"
+        },
+        {
+          "command": "infinityHarness.cancelCard",
+          "when": "view == infinityHarness.cards && viewItem =~ /running/",
+          "group": "2_agent@4"
+        },
+        {
+          "command": "infinityHarness.weighBlock",
+          "when": "view == infinityHarness.attention && viewItem == outcome",
+          "group": "inline"
+        },
+        {
+          "command": "infinityHarness.approve",
+          "when": "view == infinityHarness.cards && viewItem =~ /reviewable/",
+          "group": "inline@0"
+        },
+        {
+          "command": "infinityHarness.approve",
+          "when": "view == infinityHarness.cards && viewItem =~ /reviewable/",
+          "group": "3_review@1"
+        },
+        {
+          "command": "infinityHarness.requestChanges",
+          "when": "view == infinityHarness.cards && viewItem =~ /reviewable/",
+          "group": "3_review@2"
+        },
+        {
+          "command": "infinityHarness.landNow",
+          "when": "view == infinityHarness.cards && viewItem =~ /reviewable/",
+          "group": "3_review@3"
+        },
+        {
+          "command": "infinityHarness.tryCheckout",
+          "when": "view == infinityHarness.cards && viewItem =~ /branch/ && viewItem =~ /reviewable|running/",
+          "group": "4_try@1"
+        },
+        {
+          "command": "infinityHarness.tryApply",
+          "when": "view == infinityHarness.cards && viewItem =~ /branch/ && viewItem =~ /reviewable|running/",
+          "group": "4_try@2"
+        },
+        {
+          "command": "infinityHarness.approveApproval",
+          "when": "view == infinityHarness.attention && viewItem == approval",
+          "group": "inline@1"
+        },
+        {
+          "command": "infinityHarness.denyApproval",
+          "when": "view == infinityHarness.attention && viewItem == approval",
+          "group": "inline@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "infinityHarness.planFromSelection",
+          "when": "editorHasSelection && infinityHarness.state == ready",
+          "group": "infinityHarness@1"
+        },
+        {
+          "command": "infinityHarness.sendSelection",
+          "when": "editorHasSelection && infinityHarness.state == ready",
+          "group": "infinityHarness@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "infinityHarness.openCard",
+          "when": "false"
+        },
+        {
+          "command": "infinityHarness.openTerminal",
+          "when": "false"
+        },
+        {
+          "command": "infinityHarness.runCard",
+          "when": "false"
+        },
+        {
+          "command": "infinityHarness.cancelCard",
+          "when": "false"
+        },
+        {
+          "command": "infinityHarness.openWorktree",
+          "when": "false"
+        },
+        {
+          "command": "infinityHarness.weighBlock",
+          "when": "false"
+        },
+        {
+          "command": "infinityHarness.reviewComment",
+          "when": "false"
+        },
+        {
+          "command": "infinityHarness.approveApproval",
+          "when": "false"
+        },
+        {
+          "command": "infinityHarness.denyApproval",
+          "when": "false"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "infinityHarness.reviewComment",
+          "group": "inline",
+          "when": "commentController == infinityHarness.review"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Infinity Harness",
+      "properties": {
+        "infinityHarness.daemonUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:7420",
+          "description": "Where the Infinity Harness daemon serves its API and UI."
+        },
+        "infinityHarness.apiToken": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "The daemon's API token, from `.meta-harness/api-token` in its checkout. Needed when the daemon is on another machine or started with `MH_REQUIRE_TOKEN=1`; not needed for a daemon on this machine."
+        },
+        "infinityHarness.installPath": {
+          "type": "string",
+          "default": "",
+          "description": "Folder of your Infinity Harness checkout. Start Daemon runs `pnpm start` there."
+        },
+        "infinityHarness.notifications": {
+          "type": "string",
+          "enum": [
+            "all",
+            "attention",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Cards landing, plus everything that needs you.",
+            "Only messages for you, blocks and escalations.",
+            "No pop-ups; the Needs you view and status bar still update."
+          ],
+          "default": "attention",
+          "description": "Which board events show a notification."
+        },
+        "infinityHarness.editorContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Add the active file (and selection) to goals you plan from the editor."
+        },
+        "infinityHarness.ideBridge": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let agents on this board ask you questions, read this window's language-server problems and show you proposed changes (the ide_* tools). Turn off to keep this window out of it."
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@mh/client": "workspace:*",
+    "@mh/core": "workspace:*",
+    "@types/node": "^24.19.2",
+    "@types/vscode": "~1.100.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  },
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/infinity-harness/infinity-harness.git",
+    "directory": "apps/vscode"
+  },
+  "homepage": "https://github.com/infinity-harness/infinity-harness#readme",
+  "bugs": {
+    "url": "https://github.com/infinity-harness/infinity-harness/issues"
+  },
+  "galleryBanner": {
+    "color": "#101828",
+    "theme": "dark"
+  }
+}

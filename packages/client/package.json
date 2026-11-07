@@ -1,0 +1,13 @@
+{
+  "name": "@mh/client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node/index.ts"
+  },
+  "dependencies": {
+    "@mh/core": "workspace:*"
+  }
+}

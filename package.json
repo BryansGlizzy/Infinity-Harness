@@ -1,0 +1,25 @@
+{
+  "name": "meta-harness",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.16.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "daemon": "node --watch-path=apps/daemon/src --watch-path=packages apps/daemon/src/main.ts",
+    "web": "pnpm --filter @mh/web dev",
+    "build:web": "pnpm --filter @mh/web build",
+    "start": "pnpm build:web && node apps/daemon/src/main.ts",
+    "typecheck": "tsc -p tsconfig.json && pnpm --filter @mh/web typecheck && pnpm --filter infinity-harness typecheck",
+    "test": "node --test \"packages/*/test/*.test.ts\" \"apps/daemon/test/*.test.ts\" \"apps/vscode/test/*.test.ts\" \"apps/cli/test/*.test.ts\" \"apps/tui/test/*.test.ts\"",
+    "build:vscode": "pnpm --filter infinity-harness build",
+    "package:vscode": "pnpm --filter infinity-harness package",
+    "ih": "node apps/cli/src/main.ts",
+    "tui": "node apps/cli/src/main.ts tui"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,55 @@
+name: VS Code extension
+
+# Builds the extension on every change to it (checks pass, a .vsix is attached to the run). Pushing a tag like
+# vscode-v0.2.0 also publishes it, to the Visual Studio Marketplace and Open VSX, when their tokens are set as secrets
+# (VSCE_PAT and OVSX_PAT). Without a token the publish step is skipped, so this is safe to run before the project is public.
+
+on:
+  push:
+    branches: [main]
+    paths: ['apps/vscode/**', 'packages/core/**', '.github/workflows/vsix.yml']
+    tags: ['vscode-v*']
+  pull_request:
+    paths: ['apps/vscode/**', 'packages/core/**']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter infinity-harness typecheck
+      - name: Extension tests (the client and the bundled extension against a live daemon)
+        run: node --test "apps/vscode/test/*.test.ts"
+      - name: Package
+        run: pnpm --filter infinity-harness package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: infinity-harness-vsix
+          path: apps/vscode/dist/infinity-harness.vsix
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/vscode-v')
+    runs-on: ubuntu-latest
+    # Job-level, so the steps below can test whether a token exists.
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: infinity-harness-vsix
+          path: dist
+      - name: Visual Studio Marketplace
+        if: ${{ env.VSCE_PAT != '' }}
+        run: npx --yes @vscode/vsce@3 publish --packagePath dist/infinity-harness.vsix
+      - name: Open VSX
+        if: ${{ env.OVSX_PAT != '' }}
+        run: npx --yes ovsx@0.10 publish dist/infinity-harness.vsix

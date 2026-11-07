@@ -1,0 +1,20 @@
+{
+  "name": "@mh/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@fastify/static": "^10.1.8",
+    "@fastify/websocket": "^11.3.6",
+    "@mh/adapters": "workspace:*",
+    "@mh/context": "workspace:*",
+    "@mh/core": "workspace:*",
+    "@mh/db": "workspace:*",
+    "@mh/fast-lane": "workspace:*",
+    "@mh/gateway": "workspace:*",
+    "@mh/router": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "fastify": "^5.12.7",
+    "zod": "^4.6.7"
+  }
+}

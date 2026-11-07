@@ -1,0 +1,14 @@
+{
+  "name": "@mh/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ih": "./src/main.ts"
+  },
+  "dependencies": {
+    "@mh/client": "workspace:*",
+    "@mh/core": "workspace:*",
+    "@mh/tui": "workspace:*"
+  }
+}

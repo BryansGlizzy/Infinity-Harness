@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.meta-harness/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Third-party projects cloned for study (not part of this repo)
+research/
