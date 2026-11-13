@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { Approval, ApprovalKind, Card, CardStatus, Message, Outcome } from '@mh/core';
+import type { Approval, ApprovalKind, Card, CardStatus, FedRequest, Message, Outcome, Peer } from '@ih/core';
 import type { HarnessModel } from './state.ts';
 
 const STATUS: Record<CardStatus, { label: string; icon: string; color?: string }> = {
@@ -95,13 +95,17 @@ export const APPROVAL_LABEL: Record<ApprovalKind, string> = {
   install_skill: 'Skill',
   grant: 'Tool grant',
   install_tool: 'Install a tool',
+  peer_request: 'Request to another swarm',
 };
 
 type AttentionItem =
   | { kind: 'approval'; approval: Approval }
   | { kind: 'message'; message: Message }
   | { kind: 'outcome'; outcome: Outcome }
-  | { kind: 'blocked'; card: Card };
+  | { kind: 'blocked'; card: Card }
+  | { kind: 'peer'; peer: Peer }
+  | { kind: 'peerRequest'; request: FedRequest }
+  | { kind: 'peerReply'; request: FedRequest };
 
 const SEEN_KEY = 'infinityHarness.inboxSeenAt';
 
@@ -139,7 +143,7 @@ export class AttentionProvider implements vscode.TreeDataProvider<AttentionItem>
   count(): number {
     const seen = this.context.workspaceState.get<string>(SEEN_KEY) ?? '';
     const fresh = this.model.inbox.filter((m) => m.createdAt > seen).length;
-    return fresh + this.model.pending.length + this.model.approvals.length + this.blocked().length;
+    return fresh + this.model.pending.length + this.model.approvals.length + this.blocked().length + this.model.federation.knocks.length + this.model.federation.requests.length + this.model.federation.replies.length;
   }
 
   /** Blocked cards, except those whose escalation is already listed as a request to answer. */
@@ -163,7 +167,10 @@ export class AttentionProvider implements vscode.TreeDataProvider<AttentionItem>
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, 30)
       .map((message) => ({ kind: 'message', message }));
-    return [...approvals, ...outcomes, ...blocked, ...messages];
+    const peers: AttentionItem[] = this.model.federation.knocks.map((peer) => ({ kind: 'peer', peer }));
+    const requests: AttentionItem[] = this.model.federation.requests.map((request) => ({ kind: 'peerRequest', request }));
+    const replies: AttentionItem[] = this.model.federation.replies.map((request) => ({ kind: 'peerReply', request }));
+    return [...approvals, ...peers, ...requests, ...replies, ...outcomes, ...blocked, ...messages];
   }
 
   getTreeItem(item: AttentionItem): vscode.TreeItem {
@@ -177,6 +184,37 @@ export class AttentionProvider implements vscode.TreeDataProvider<AttentionItem>
         t.tooltip = new vscode.MarkdownString(`${a.summary}\n\n_${APPROVAL_LABEL[a.kind]} · asked by ${a.requestedBy.replace(/^card:/, 'card ')} · ${new Date(a.createdAt).toLocaleString()}_`);
         t.contextValue = 'approval';
         t.command = { command: 'infinityHarness.decideApproval', title: 'Decide', arguments: [a] };
+        return t;
+      }
+      case 'peer': {
+        const p = item.peer;
+        const t = new vscode.TreeItem(`Swarm "${p.knock?.name ?? p.name ?? p.label}" wants to connect`);
+        t.iconPath = new vscode.ThemeIcon('broadcast', new vscode.ThemeColor('charts.orange'));
+        t.description = 'Another swarm';
+        t.tooltip = new vscode.MarkdownString(`Fingerprint \`${p.fingerprint ?? '?'}\`\n\nCompare it with what the other operator sees before you accept. Until you do, nothing it sent reaches any agent.`);
+        t.contextValue = 'peer';
+        t.command = { command: 'infinityHarness.decidePeer', title: 'Decide', arguments: [p] };
+        return t;
+      }
+      case 'peerRequest': {
+        const r = item.request;
+        const t = new vscode.TreeItem(`Request from ${r.peerName ?? 'a peer'}: ${r.title}`);
+        t.iconPath = new vscode.ThemeIcon('mail', new vscode.ThemeColor('charts.orange'));
+        t.description = r.blocking ? 'they are waiting' : 'Another swarm';
+        t.tooltip = new vscode.MarkdownString(`Written by another swarm (untrusted text):\n\n${r.description.slice(0, 1200)}`);
+        t.contextValue = 'peerRequest';
+        t.command = { command: 'infinityHarness.decidePeerRequest', title: 'Decide', arguments: [r] };
+        return t;
+      }
+      case 'peerReply': {
+        const r = item.request;
+        const asks = r.status === 'needs_info';
+        const t = new vscode.TreeItem(asks ? `${r.peerName ?? 'A peer'} asks about "${r.title}"` : `Check what ${r.peerName ?? 'a peer'} landed: ${r.title}`);
+        t.iconPath = new vscode.ThemeIcon(asks ? 'question' : 'verified', new vscode.ThemeColor('charts.orange'));
+        t.description = asks ? 'Answer' : 'Confirm or send back';
+        t.tooltip = new vscode.MarkdownString(asks ? `Their question (their words):\n\n${[...r.thread].reverse().find((e) => e.side === 'receiver')?.text ?? ''}` : `Landed: ${r.resolution?.ref ?? ''} ${r.resolution?.note ?? ''}`);
+        t.contextValue = 'peerReply';
+        t.command = { command: 'infinityHarness.decidePeerReply', title: 'Reply', arguments: [r] };
         return t;
       }
       case 'outcome': {
@@ -204,7 +242,10 @@ export class AttentionProvider implements vscode.TreeDataProvider<AttentionItem>
         t.iconPath = new vscode.ThemeIcon(m.fromActor === 'daemon:policy' ? 'shield' : 'mail');
         t.description = fromCard ? fromCard.title : m.fromActor.replace(/^daemon:/, 'board ');
         t.tooltip = new vscode.MarkdownString(`${m.body}\n\n_${new Date(m.createdAt).toLocaleString()}_`);
-        const target = fromCard?.id ?? /\((c_\w+)[,)]/.exec(m.body)?.[1];
+        t.contextValue = 'message';
+        // The card it came from, or the first card its text names (board notices: "Title (c_…)", the final summary: "open card c_…").
+        const named = [...m.body.matchAll(/\bc_[0-9a-f]{6,}\b/g)].map((x) => x[0]).find((id) => this.model.card(id));
+        const target = fromCard?.id ?? named;
         t.command = target
           ? { command: 'infinityHarness.openCard', title: 'Open Card', arguments: [target] }
           : { command: 'infinityHarness.showText', title: 'Show', arguments: [m.body] };

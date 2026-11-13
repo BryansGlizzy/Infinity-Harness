@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { DEFAULT_SETTINGS, SKILLS, type PriorOverride, type Settings, type Skill } from '@mh/core';
+import { DEFAULT_SETTINGS, SKILLS, type PriorOverride, type Settings, type Skill } from '@ih/core';
 import { api, type AgentPrior, type PoolWithStatus } from './api.ts';
 import { remember, saved } from './storage.ts';
 import { Field, NumField, Toggle } from './SettingsFields.tsx';
@@ -21,13 +21,13 @@ type Tab = (typeof TABS)[number]['id'];
 
 /** Settings each tab owns, for its "Reset to defaults". */
 const SECTION_KEYS: Record<Tab, (keyof Settings)[]> = {
-  routing: ['autoRoute', 'claudeReservePct', 'codexReservePct', 'rerouteAfterSec', 'stallMinutes', 'poolSlots', 'scarcity'],
+  routing: ['autoRoute', 'claudeReservePct', 'codexReservePct', 'rerouteAfterSec', 'stallMinutes', 'poolSlots', 'scarcity', 'agentWeights'],
   refinery: ['autoLand', 'landMode', 'testTimeoutSec', 'mergeAttempts', 'maxRetries', 'crossReview', 'reviewThreshold', 'maxReviewRounds'],
   learning: ['learnFromOutcomes', 'kevOutcomeScoring', 'priorOverrides'],
   fastlane: ['narrator', 'specLint', 'queryRewrite', 'artifactTagging', 'quickAnswers', 'notificationText'],
   guardrails: ['maxDepth', 'maxChildren', 'maxCardsPerTurn', 'councilVerifyRounds', 'shareToolchains', 'toolPaths', 'directParallel'],
   budgets: ['budgets'],
-  tools: ['humanReview', 'bestOfN', 'grants', 'autoApproveSpawn'],
+  tools: ['humanReview', 'finalSummary', 'bestOfN', 'grants', 'autoApproveSpawn'],
 };
 
 /** One folder per line; saved when the field loses focus. Only absolute and `~/` paths are kept. */
@@ -180,7 +180,7 @@ export function SettingsPanel(props: {
         <button className="ghost icon-btn" onClick={props.onClose} aria-label="Close settings">✕</button>
       </div>
       <p className="hint">
-        Agents, roles and permissions are in <button className="link" onClick={props.onOpenAgents}>Agents</button>. Live pool usage is in Pools.
+        Agents, system harness installs/logins, roles and permissions are in <button className="link" onClick={props.onOpenAgents}>Agents</button>. Live pool usage is in Pools.
       </p>
       <div className="tabs settings-tabs" role="tablist" aria-label="Settings sections">
         {TABS.map((t) => (
@@ -209,6 +209,7 @@ export function SettingsPanel(props: {
               <NumField label="Re-route after" unit=" s" hint="How long a ready card waits for a halted pool before it moves to the next best agent." value={settings.rerouteAfterSec} def={D.rerouteAfterSec} min={0} onSave={(n) => save({ rerouteAfterSec: n })} />
               <NumField label="Stalled after" unit=" min" hint="A turn with no activity this long is ended and the card goes back to Ready." value={settings.stallMinutes} def={D.stallMinutes} min={0} onSave={(n) => save({ stallMinutes: n })} />
             </div>
+            <p className="hint">Want cards to go to a particular agent more (or less) often? Each worker has a <strong>routing weight</strong> in <button className="link" onClick={props.onOpenAgents}>Agents</button>: above 1 favours it for cards it handles well, below 1 holds it back, 0 keeps cards off it.</p>
             <h3>Pools</h3>
             <div className="table-scroll surface-box">
               <table className="pools-table">
@@ -243,8 +244,8 @@ export function SettingsPanel(props: {
                   <option value="local">Local merge onto the default branch</option>
                 </select>
               </Field>
-              <Field label="Worktree setup command" hint="Runs once in each new card worktree before its agent starts, and again if you change it. Install dependencies, copy .env. MH_REPO_PATH is the main checkout. If it fails the agent is told." def="none">
-                <input defaultValue={settings.worktreeSetup} key={settings.worktreeSetup} placeholder={'e.g. pnpm install --frozen-lockfile --prefer-offline && cp "$MH_REPO_PATH/.env" .env'} onBlur={(e) => e.target.value !== settings.worktreeSetup && save({ worktreeSetup: e.target.value })} />
+              <Field label="Worktree setup command" hint="Runs once in each new card worktree before its agent starts, and again if you change it. Install dependencies, copy .env. IH_REPO_PATH is the main checkout. If it fails the agent is told." def="none">
+                <input defaultValue={settings.worktreeSetup} key={settings.worktreeSetup} placeholder={'e.g. pnpm install --frozen-lockfile --prefer-offline && cp "$IH_REPO_PATH/.env" .env'} onBlur={(e) => e.target.value !== settings.worktreeSetup && save({ worktreeSetup: e.target.value })} />
               </Field>
               <NumField label="Setup timeout" unit=" s" value={settings.worktreeSetupTimeoutSec} def={D.worktreeSetupTimeoutSec} min={10} onSave={(n) => save({ worktreeSetupTimeoutSec: n })} />
               <NumField label="Test timeout" unit=" s" value={settings.testTimeoutSec} def={D.testTimeoutSec} min={10} onSave={(n) => save({ testTimeoutSec: n })} />
@@ -307,7 +308,7 @@ export function SettingsPanel(props: {
             <div className="fields">
               <NumField
                 label="Workers at once"
-                hint="Boards in direct mode share one folder. Kimi and Codex edit without asking, so file reservations can't keep them apart; raise this only for cards that touch separate files."
+                hint="Boards in direct mode share one folder. Kimi and Codex edit without asking, so file reservations can't keep them apart; cards are planned to own separate files, and 1 makes the board strictly one at a time."
                 value={settings.directParallel}
                 def={D.directParallel}
                 min={1}

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Store } from '@mh/db';
+import type { Store } from '@ih/db';
 import { git } from '../src/git.ts';
 import { reservePaths } from '../src/leases.ts';
 import { LOCKOUT_PATTERN } from '../src/runner.ts';

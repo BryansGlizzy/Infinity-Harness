@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { PoolLimits, UpstreamPool } from '@mh/gateway';
+import type { PoolLimits, UpstreamPool } from '@ih/gateway';
 
 export interface ApiPool extends UpstreamPool {
   limits: PoolLimits;
@@ -49,7 +49,7 @@ const isClaudeSessionMarker = (key: string) =>
 
 /** The environment agent processes get: provider keys and parent-session markers removed, the gateway token added. */
 export function agentEnvironment(env: NodeJS.ProcessEnv, token: string): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = { ...env, MH_GATEWAY_TOKEN: token };
+  const out: NodeJS.ProcessEnv = { ...env, IH_GATEWAY_TOKEN: token };
   for (const key of SECRET_ENV) delete out[key];
   for (const key of Object.keys(out)) if (isClaudeSessionMarker(key)) delete out[key];
   return out;

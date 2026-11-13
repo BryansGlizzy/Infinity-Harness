@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { ChatItem } from '@mh/core';
+import type { ChatItem } from '@ih/core';
 import type { HarnessModel } from './state.ts';
 import { goalsOf, subtreeOf } from './summary.ts';
 

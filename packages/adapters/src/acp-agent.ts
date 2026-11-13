@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import type { HarnessEvent, ModelOption, ReasoningOptions } from '@mh/core';
+import type { HarnessEvent, ModelOption, ReasoningOptions } from '@ih/core';
 import { AcpConnection } from './acp.ts';
 import { inShared, isInside, rootsFor, writableDirsFor } from './environment.ts';
 import type { AgentSession, HarnessAdapter, PermissionDecision, SessionOptions, UsageReport } from './types.ts';
@@ -135,8 +135,51 @@ function contentText(content: Json): string {
   return '';
 }
 
+const MAX_OUTPUT = 8000;
+
+/** Normalizes line endings and keeps the head and tail of very long output, so one noisy build cannot flood the log. */
+export function clipOutput(text: string): string {
+  const s = text.replace(/\r\n?/g, '\n');
+  if (s.length <= MAX_OUTPUT) return s;
+  const half = MAX_OUTPUT / 2;
+  return `${s.slice(0, half)}\n… (${s.length - MAX_OUTPUT} characters omitted) …\n${s.slice(-half)}`;
+}
+
+/**
+ * What a tool call printed, from whichever shape the harness uses:
+ *  - Codex streams `_meta.terminal_output_delta` while the command runs, and `_meta.terminal_exit` at the end;
+ *  - Kimi puts the whole output in `rawOutput` (a string) and in `content` text when the call completes;
+ *  - Agy's `rawOutput` is an object (`combinedOutput`, `exitCode`) at completion.
+ * Input (`rawInput`, and Kimi's in-progress `content`, which is the arguments as JSON) is never output.
+ */
+export function toolOutput(update: Json): { text: string; exitCode?: number } | null {
+  const meta: Json = update?._meta ?? {};
+  const delta = meta.terminal_output_delta;
+  if (delta && typeof delta.data === 'string' && delta.data) return { text: String(delta.data).replace(/\r\n?/g, '\n') };
+  if (update?.status !== 'completed' && update?.status !== 'failed') return null;
+  const raw = update.rawOutput;
+  let text = '';
+  let exitCode: number | undefined;
+  if (typeof raw === 'string') text = raw;
+  else if (raw && typeof raw === 'object') {
+    text = String(raw.combinedOutput ?? raw.formatted_output ?? raw.output ?? raw.stdout ?? raw.stderr ?? '');
+    const code = raw.exitCode ?? raw.exit_code ?? raw.metadata?.exit; // OpenCode keeps it in metadata
+    if (typeof code === 'number') exitCode = code;
+  }
+  if (!text) {
+    text = (update.content ?? [])
+      .filter((c: Json) => c?.type === 'content' && c.content?.type === 'text')
+      .map((c: Json) => String(c.content.text ?? ''))
+      .join('\n');
+  }
+  const code = meta.terminal_exit?.exit_code;
+  if (exitCode === undefined && typeof code === 'number') exitCode = code;
+  if (!text.trim() && exitCode === undefined) return null;
+  return { text: clipOutput(text), ...(exitCode !== undefined ? { exitCode } : {}) };
+}
+
 /** Maps one ACP `session/update` payload to a normalized event. Text chunks are returned separately so they can be merged. */
-export function mapUpdate(update: Json): { event?: HarnessEvent; chunk?: { kind: 'message' | 'thought'; text: string } } {
+export function mapUpdate(update: Json): { event?: HarnessEvent; chunk?: { kind: 'message' | 'thought'; text: string }; output?: Extract<HarnessEvent, { type: 'tool_output' }> } {
   switch (update?.sessionUpdate) {
     case 'agent_message_chunk':
       return { chunk: { kind: 'message', text: contentText(update.content) } };
@@ -155,8 +198,11 @@ export function mapUpdate(update: Json): { event?: HarnessEvent; chunk?: { kind:
       };
     case 'tool_call_update': {
       const locations: string[] = (update.locations ?? []).map((l: Json) => String(l.path));
-      if (!update.status && !update.title && !locations.length) return {};
+      const printed = toolOutput(update);
+      const output = printed ? { output: { type: 'tool_output' as const, id: String(update.toolCallId), ...printed } } : {};
+      if (!update.status && !update.title && !locations.length) return output;
       return {
+        ...output,
         event: {
           type: 'tool_update',
           id: String(update.toolCallId),
@@ -165,6 +211,14 @@ export function mapUpdate(update: Json): { event?: HarnessEvent; chunk?: { kind:
           ...(locations.length ? { locations } : {}),
         },
       };
+    }
+    case 'session_info_update': {
+      // OpenCode retries a failing provider by itself and only says so here; without this the card just looks stuck.
+      const retry = update._meta?.['opencode/retry'];
+      if (!retry) return {};
+      const why = retry.error?.message ? String(retry.error.message) : 'provider error';
+      const status = retry.error?.status ? ` (${retry.error.status})` : '';
+      return { event: { type: 'notice', text: `Provider problem, retrying (attempt ${retry.attempt ?? '?'}): ${why}${status}` } };
     }
     case 'plan':
       return {
@@ -178,8 +232,23 @@ export function mapUpdate(update: Json): { event?: HarnessEvent; chunk?: { kind:
   }
 }
 
+/**
+ * Some harnesses (Kimi) repeat `tool_call_update … in_progress` several times a second while a command runs, with
+ * nothing new in it. One card produced 9,000 such events: each is a database row, a broadcast and a re-render in every
+ * open client. True when `event` just repeats the last update seen for the same tool (`seen` remembers them).
+ */
+export function isRepeatedToolUpdate(seen: Map<string, string>, event: HarnessEvent): boolean {
+  if (event.type !== 'tool_call' && event.type !== 'tool_update') return false;
+  const sig = JSON.stringify([event.status, event.title ?? null, event.locations ?? null]);
+  if (event.type === 'tool_update' && seen.get(event.id) === sig) return true;
+  seen.set(event.id, sig);
+  return false;
+}
+
 interface LiveSession {
   opts: SessionOptions;
+  /** Last update seen per tool call, to drop pure repeats. */
+  tools: Map<string, string>;
   text: { kind: 'message' | 'thought'; value: string } | null;
   timer: NodeJS.Timeout | null;
 }
@@ -336,7 +405,7 @@ export class AcpAgent implements HarnessAdapter {
         await conn.request('session/set_config_option', { sessionId, configId: r.configId, value: opts.reasoning });
       }
     }
-    const live: LiveSession = { opts, text: null, timer: null };
+    const live: LiveSession = { opts, tools: new Map(), text: null, timer: null };
     this.sessions.set(sessionId, live);
 
     return {
@@ -375,7 +444,11 @@ export class AcpAgent implements HarnessAdapter {
   private onUpdate(params: Json) {
     const live = this.sessions.get(String(params?.sessionId));
     if (!live) return;
-    const { event, chunk } = mapUpdate(params.update);
+    const { event, chunk, output } = mapUpdate(params.update);
+    if (output) {
+      this.flush(live);
+      live.opts.onEvent(output);
+    }
     if (chunk) {
       if (live.text && live.text.kind !== chunk.kind) this.flush(live);
       live.text = { kind: chunk.kind, value: (live.text?.value ?? '') + chunk.text };
@@ -383,6 +456,7 @@ export class AcpAgent implements HarnessAdapter {
       return;
     }
     if (event) {
+      if (isRepeatedToolUpdate(live.tools, event)) return;
       this.flush(live);
       live.opts.onEvent(event);
     }

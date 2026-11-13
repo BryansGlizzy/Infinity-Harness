@@ -1,5 +1,5 @@
-import { loadNeeds, type DaemonApi, type Need, type PoolWithStatus, type UsageSummary } from '@mh/client';
-import type { Board, Card } from '@mh/core';
+import { loadNeeds, type DaemonApi, type Need, type PoolWithStatus, type UsageSummary } from '@ih/client';
+import type { Board, Card } from '@ih/core';
 
 /** Everything one machine's screens show, as last loaded. Kept across a lost connection (and then shown dimmed). */
 export interface Snapshot {

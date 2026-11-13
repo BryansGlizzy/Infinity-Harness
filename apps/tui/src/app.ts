@@ -1,7 +1,7 @@
-// The TUI's brain: state, input, actions. Drawing is views.ts, terminal control is term.ts, data is @mh/client.
-import { EventStream, isLive, type DaemonApi, type Need } from '@mh/client';
-import { attachTerminal, type Fleet } from '@mh/client/node';
-import { CARD_STATUSES, type CardStatus } from '@mh/core';
+// The TUI's brain: state, input, actions. Drawing is views.ts, terminal control is term.ts, data is @ih/client.
+import { EventStream, isLive, type DaemonApi, type Need } from '@ih/client';
+import { attachTerminal, type Fleet } from '@ih/client/node';
+import { CARD_STATUSES, type CardStatus } from '@ih/core';
 import { Canvas } from './canvas.ts';
 import { EMPTY, loadSnapshot, needKey, type Snapshot } from './data.ts';
 import type { InputEvent, KeyEvent, MouseEvent } from './input.ts';
@@ -9,7 +9,7 @@ import { SeenStore } from './seen.ts';
 import type { AppState, Modal, View } from './state.ts';
 import { VIEWS } from './state.ts';
 import type { TermIo } from './term.ts';
-import { BODY_TOP, BOTTOM, boardRows, cardActions, draw, needActions } from './views.ts';
+import { BODY_TOP, BOTTOM, boardRows, cardActions, draw, fileRows, needActions, poolActions } from './views.ts';
 
 export interface AppOptions {
   fleet: Fleet;
@@ -64,8 +64,9 @@ export class App {
       machine: opts.machine ?? 'local',
       snap: EMPTY,
       view: 'needs',
-      sel: { needs: 0, board: 0, pools: 0 },
-      scroll: { needs: 0, board: 0, pools: 0 },
+      sel: { needs: 0, board: 0, pools: 0, files: 0 },
+      scroll: { needs: 0, board: 0, pools: 0, files: 0 },
+      files: { boardId: null, dirs: {}, expanded: new Set() },
       folded: new Set(['done']),
       modal: null,
       toast: null,
@@ -155,6 +156,10 @@ export class App {
       this.seen.retain(scope, snap.needs.map(needKey));
       const fresh = snap.needs.filter((n) => !this.seen.isSeen(scope, needKey(n)) && !before?.needs.some((o) => needKey(o) === needKey(n)));
       if (fresh.length && before && this.opts.bell !== false) this.term.write('\x07');
+      if (this.state.view === 'files') {
+        if (this.state.files.boardId !== (snap.board?.id ?? null)) void this.loadFiles();
+        else this.reloadFiles();
+      }
     } catch (err) {
       const old = this.snaps.get(machine) ?? EMPTY;
       this.snaps.set(machine, { ...old, error: (err as Error).message });
@@ -190,8 +195,8 @@ export class App {
 
   private clamp() {
     const s = this.state;
-    const counts: Record<View, number> = { needs: s.snap.needs.length, board: boardRows(s.snap.cards, s.folded).length, pools: s.snap.pools.length };
-    for (const v of ['needs', 'board', 'pools'] as const) s.sel[v] = Math.max(0, Math.min(s.sel[v], counts[v] - 1));
+    const counts: Record<View, number> = { needs: s.snap.needs.length, board: boardRows(s.snap.cards, s.folded).length, pools: s.snap.pools.length, files: fileRows(s.files).length };
+    for (const v of ['needs', 'board', 'pools', 'files'] as const) s.sel[v] = Math.max(0, Math.min(s.sel[v], counts[v] - 1));
   }
 
   private selectedNeed(): Need | undefined {
@@ -228,7 +233,7 @@ export class App {
     const s = this.state;
     if (e.action === 'wheel') {
       const step = e.dir === 'up' ? -3 : 3;
-      if (s.modal?.kind === 'card') s.modal.scroll = Math.max(0, s.modal.scroll + step);
+      if (s.modal?.kind === 'card' || s.modal?.kind === 'file') s.modal.scroll = Math.max(0, s.modal.scroll + step);
       else if (s.modal?.kind === 'menu') s.modal.index = Math.max(0, Math.min(s.modal.items.length - 1, s.modal.index + (step > 0 ? 1 : -1)));
       else if (!s.modal) this.move(step);
       return this.render();
@@ -249,6 +254,7 @@ export class App {
       return;
     }
     if (m?.kind === 'card') return this.cardKey(m, e);
+    if (m?.kind === 'file') return this.fileKey(m, e);
     switch (e.name) {
       case 'q':
         return this.stop();
@@ -265,7 +271,16 @@ export class App {
       case '1':
       case '2':
       case '3':
+      case '4':
         return this.setView(VIEWS[Number(e.name) - 1]!.id);
+      case 'right':
+      case 'l':
+        if (s.view === 'files') return this.fileStep('open');
+        return;
+      case 'left':
+      case 'h':
+        if (s.view === 'files') return this.fileStep('close');
+        return;
       case 'M':
         return this.openMachineMenu();
       case 'B':
@@ -295,6 +310,11 @@ export class App {
       const action = n ? needActions(n).find((a) => a.key === e.name) : undefined;
       if (action) return this.needAction(action.id);
     }
+    if (s.view === 'pools') {
+      const p = s.snap.pools[s.sel.pools];
+      const action = p ? poolActions(p).find((a) => a.key === e.name) : undefined;
+      if (action) return this.poolAction(action.id);
+    }
     if (s.view === 'board' && e.name === 'f') {
       const row = boardRows(s.snap.cards, s.folded)[s.sel.board];
       if (row?.kind === 'header') this.toggleFold(row.status);
@@ -303,12 +323,110 @@ export class App {
 
   private setView(v: View) {
     this.state.view = v;
+    if (v === 'files') void this.loadFiles();
+    this.render();
+  }
+
+  // --- the file tree
+
+  /** Lists a folder of the current board's project (the top folder by default) and keeps it. Switching board starts over. */
+  private async loadFiles(path = '', quiet = false) {
+    const api = this.api();
+    const board = this.state.snap.board;
+    if (!api || !board) return;
+    const f = this.state.files;
+    if (f.boardId !== board.id) {
+      f.boardId = board.id;
+      f.dirs = {};
+      f.expanded = new Set();
+      this.state.sel.files = 0;
+      this.state.scroll.files = 0;
+    }
+    if (quiet && !f.dirs[path]) return;
+    try {
+      const listing = await api.listFiles(board.id, path);
+      if (f.boardId === board.id) f.dirs[path] = { entries: listing.entries };
+    } catch (err) {
+      if (f.boardId === board.id && !quiet) f.dirs[path] = { error: (err as Error).message };
+    }
+    this.render();
+  }
+
+  private reloadFiles() {
+    if (this.state.view !== 'files') return;
+    void this.loadFiles('', true);
+    for (const p of this.state.files.expanded) void this.loadFiles(p, true);
+  }
+
+  private fileRow() {
+    return fileRows(this.state.files)[this.state.sel.files];
+  }
+
+  private toggleDir(path: string, to?: boolean) {
+    const f = this.state.files;
+    const open = f.expanded.has(path);
+    const next = to ?? !open;
+    if (next === open) return;
+    if (next) {
+      f.expanded.add(path);
+      if (!f.dirs[path]) void this.loadFiles(path);
+    } else f.expanded.delete(path);
+    this.render();
+  }
+
+  /** → opens a folder (or steps into it); ← closes it, or goes up to the folder it is in. */
+  private fileStep(dir: 'open' | 'close') {
+    const f = this.state.files;
+    const row = this.fileRow();
+    if (!row) return;
+    if (dir === 'open') {
+      if (row.entry.type === 'dir') this.toggleDir(row.entry.path, true);
+      else this.openFile(row.entry.path);
+      return;
+    }
+    if (row.entry.type === 'dir' && f.expanded.has(row.entry.path)) return this.toggleDir(row.entry.path, false);
+    const parent = row.entry.path.includes('/') ? row.entry.path.slice(0, row.entry.path.lastIndexOf('/')) : '';
+    const at = fileRows(f).findIndex((r) => r.entry.path === parent);
+    if (at >= 0) {
+      this.state.sel.files = at;
+      this.render();
+    }
+  }
+
+  private openFile(path: string) {
+    const api = this.api();
+    const board = this.state.snap.board;
+    if (!api || !board) return;
+    const modal: Extract<Modal, { kind: 'file' }> = { kind: 'file', path, scroll: 0, data: null, error: null };
+    this.state.modal = modal;
+    this.render();
+    void api.readFile(board.id, path).then(
+      (data) => {
+        if (this.state.modal === modal) modal.data = data;
+        this.render();
+      },
+      (err: Error) => {
+        if (this.state.modal === modal) modal.error = err.message;
+        this.render();
+      },
+    );
+  }
+
+  private fileKey(m: Extract<Modal, { kind: 'file' }>, e: KeyEvent) {
+    if (e.name === 'esc' || e.name === 'q') return this.closeModal();
+    const page = Math.max(1, this.state.modal ? 12 : 12);
+    if (e.name === 'up' || e.name === 'k') m.scroll = Math.max(0, m.scroll - 1);
+    else if (e.name === 'down' || e.name === 'j') m.scroll += 1;
+    else if (e.name === 'pageup') m.scroll = Math.max(0, m.scroll - page);
+    else if (e.name === 'pagedown' || e.name === ' ') m.scroll += page;
+    else if (e.name === 'home' || e.name === 'g') m.scroll = 0;
+    else if (e.name === 'end' || e.name === 'G') m.scroll = 1e9;
     this.render();
   }
 
   private move(by: number) {
     const s = this.state;
-    const total = s.view === 'needs' ? s.snap.needs.length : s.view === 'board' ? boardRows(s.snap.cards, s.folded).length : s.snap.pools.length;
+    const total = s.view === 'needs' ? s.snap.needs.length : s.view === 'board' ? boardRows(s.snap.cards, s.folded).length : s.view === 'files' ? fileRows(s.files).length : s.snap.pools.length;
     s.sel[s.view] = Math.max(0, Math.min(total - 1, s.sel[s.view] + by));
     this.render();
   }
@@ -325,6 +443,10 @@ export class App {
       const row = boardRows(s.snap.cards, s.folded)[s.sel.board];
       if (row?.kind === 'header') this.toggleFold(row.status);
       else if (row) this.openCard(row.card.id);
+    } else if (s.view === 'files') {
+      const row = this.fileRow();
+      if (row?.entry.type === 'dir') this.toggleDir(row.entry.path);
+      else if (row?.entry.type === 'file') this.openFile(row.entry.path);
     } else if (s.view === 'needs') {
       // Opening shows context; it never decides anything. Approving takes its own button or key.
       const n = this.selectedNeed();
@@ -363,11 +485,14 @@ export class App {
           if (row?.kind === 'header') return this.toggleFold(row.status);
           if (row) return this.openCard(row.card.id);
         }
+        if (view === 'files') return this.activate();
         if (view === 'needs' && wasSelected) return this.activate();
         return this.render();
       }
       case 'act':
         return this.needAction(a!);
+      case 'pool':
+        return this.poolAction(a!);
       case 'card':
         return this.cardAction(a!);
       case 'menu': {
@@ -457,11 +582,55 @@ export class App {
       kind: 'menu',
       title: 'Boards',
       index: Math.max(0, boards.findIndex((b) => b.id === this.state.snap.board?.id)),
-      items: boards.map((b) => ({ id: b.id, label: b.name, detail: b.mode })),
+      items: [...boards.map((b) => ({ id: b.id, label: b.name, detail: b.mode })), ...(this.state.snap.board ? [{ id: '__remove', label: 'Remove this board…', detail: this.state.snap.board.name }] : [])],
       pick: (id) => {
+        if (id === '__remove') return void this.removeBoardFlow();
         this.wantBoard = id;
-        this.state.sel = { needs: 0, board: 0, pools: 0 };
+        this.state.sel = { needs: 0, board: 0, pools: 0, files: 0 };
         void this.refresh();
+      },
+    };
+    this.render();
+  }
+
+  /** Remove the current board: forget it (the folder stays) or also delete the folder, which asks for the name typed back. */
+  private async removeBoardFlow() {
+    const board = this.state.snap.board;
+    const api = this.api();
+    if (!board || !api) return;
+    let info;
+    try {
+      info = await api.boardRemoval(board.id);
+    } catch (err) {
+      return this.toast((err as Error).message, 'bad');
+    }
+    if (info.blocked) return this.toast(info.blocked, 'bad');
+    const facts = [`${info.cards} card(s)`, info.running ? `${info.running} agent(s) working` : '', info.dirtyWorktrees ? `${info.dirtyWorktrees} worktree(s) with unsaved changes` : '', info.folder.unlandedBranches ? `${info.folder.unlandedBranches} branch(es) not landed` : '']
+      .filter(Boolean)
+      .join(', ');
+    const done = (mode: 'forget' | 'delete', confirmName?: string) =>
+      void this.run('Removing', (a) => a.removeBoard(board.id, mode, confirmName), mode === 'delete' ? 'Deleted the board and its folder.' : 'Removed from Infinity Harness. The folder is untouched.').then(() => {
+        this.wantBoard = null;
+        this.state.sel = { needs: 0, board: 0, pools: 0, files: 0 };
+        return this.refresh();
+      });
+    this.state.modal = {
+      kind: 'menu',
+      title: `Remove "${board.name}"? ${facts}`,
+      index: 2,
+      items: [
+        { id: 'forget', label: 'Remove from Infinity Harness', detail: 'the folder stays' },
+        { id: 'delete', label: 'Delete on system…', detail: info.deleteBlocked ?? board.repoPath },
+        { id: 'cancel', label: 'Cancel' },
+      ],
+      pick: (pick) => {
+        if (pick === 'forget') return done('forget');
+        if (pick !== 'delete') return;
+        if (info.deleteBlocked) return this.toast(info.deleteBlocked, 'bad');
+        this.prompt(`Delete the folder? Type the board's name: ${board.name}`, `${board.repoPath} · cannot be undone`, true, (typed) => {
+          if (typed !== board.name) return this.toast('That is not the board\'s name; nothing was deleted.', 'bad');
+          done('delete', typed);
+        });
       },
     };
     this.render();
@@ -471,8 +640,8 @@ export class App {
     if (label === this.state.machine) return;
     this.state.machine = label;
     this.wantBoard = null;
-    this.state.sel = { needs: 0, board: 0, pools: 0 };
-    this.state.scroll = { needs: 0, board: 0, pools: 0 };
+    this.state.sel = { needs: 0, board: 0, pools: 0, files: 0 };
+    this.state.scroll = { needs: 0, board: 0, pools: 0, files: 0 };
     this.openStream();
     this.render();
     void this.refresh();
@@ -545,6 +714,13 @@ export class App {
         return this.prompt('Why not? (optional)', n.title, false, (note) => void this.run('Denying', (api) => api.decide(n.id, 'deny', note || undefined), 'Denied.'));
       case 'open':
         return n.cardId ? this.openCard(n.cardId) : undefined;
+      case 'clear':
+      case 'clear-all': {
+        const board = this.state.snap.board;
+        if (!board) return;
+        const ids = id === 'clear' ? [n.id] : this.state.snap.needs.filter((x) => x.kind === 'message').map((x) => x.id);
+        return this.run('Clearing', (api) => api.dismissMessages(board.id, ids), id === 'clear' ? 'Cleared.' : 'All messages cleared.');
+      }
       case 'review-approve':
         return this.run('Approving', (api) => api.review(n.cardId!, 'approve'), 'Approved for landing.');
       case 'review-changes':
@@ -557,6 +733,52 @@ export class App {
       case 'fail':
       case 'ignore':
         return this.run('Saving', (api) => api.reviewOutcome(Number(n.id), id), 'Noted.');
+      case 'peer-approve':
+        // Accepting releases the swarm's text to this swarm's agents, so ask once, with the fingerprint to compare.
+        this.state.modal = {
+          kind: 'menu',
+          title: 'Compare this fingerprint with the other swarm\'s',
+          index: 1,
+          items: [{ id: 'yes', label: `Accept: ${n.title} (${n.detail})` }, { id: 'no', label: 'Cancel' }],
+          pick: (pick) => pick === 'yes' && void this.run('Accepting', (api) => api.decidePeer(n.id, 'approve'), 'Swarm accepted.'),
+        };
+        return this.render();
+      case 'peer-deny':
+        return void this.run('Denying', (api) => api.decidePeer(n.id, 'deny'), 'Denied. It may knock again.');
+      case 'peer-block':
+        return void this.run('Blocking', (api) => api.decidePeer(n.id, 'block'), 'Blocked.');
+      case 'req-approve':
+        return void this.run('Approving', (api) => api.approvePeerRequest(n.id), 'Approved; the orchestrator is planning it.');
+      case 'req-ask':
+        return this.prompt('Your question for the other swarm', n.title, true, (q) => void this.run('Asking', (api) => api.askPeerInfo(n.id, q), 'Question sent.'));
+      case 'reply-answer':
+        return this.prompt('Your answer', n.title, true, (text) => void this.run('Answering', (api) => api.commentPeerRequest(n.id, text), 'Answer sent.'));
+      case 'reply-confirm':
+        return void this.run('Confirming', (api) => api.confirmPeerRequest(n.id), 'Confirmed: marked done.');
+      case 'reply-reopen':
+        return this.prompt('What is still wrong? (they read this)', n.title, true, (why) => void this.run('Sending back', (api) => api.reopenPeerRequest(n.id, why), 'Sent back.'));
+      case 'req-decline':
+        return this.prompt('Why are you declining? (the sender sees this)', n.title, true, (why) => void this.run('Declining', (api) => api.declinePeerRequest(n.id, why), 'Declined.'));
+    }
+  }
+
+  /** Test a pool's model now, or put a pool that was taken out of rotation back in. */
+  private async poolAction(id: string): Promise<void> {
+    const p = this.state.snap.pools[this.state.sel.pools];
+    const api = this.api();
+    if (!p) return;
+    if (!api) return this.toast(`${this.state.machine} is not connected right now.`, 'bad');
+    if (id === 'pool-restore') return this.run('Restoring', (a) => a.restorePool(p.id), `${p.label} is back in rotation.`);
+    this.state.busy = 'Testing';
+    this.render();
+    try {
+      const v = await api.testPool(p.id);
+      this.state.busy = null;
+      this.toast(v.reachable === 'online' ? `${p.label}: online${v.latencyMs !== null ? `, ${v.latencyMs} ms` : ''}.` : `${p.label}: no response${v.detail ? ` (${v.detail})` : ''}.`, v.reachable === 'online' ? 'ok' : 'bad');
+      await this.refresh();
+    } catch (err) {
+      this.state.busy = null;
+      this.toast((err as Error).message, 'bad');
     }
   }
 

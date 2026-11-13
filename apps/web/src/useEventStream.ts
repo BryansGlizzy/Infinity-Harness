@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { EventStream, type StreamMessage } from '@mh/client';
+import { EventStream, type StreamMessage } from '@ih/client';
 import { api } from './api.ts';
 
 /**

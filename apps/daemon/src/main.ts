@@ -1,11 +1,11 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readCodexRateLimits } from '@mh/adapters';
-import { Store } from '@mh/db';
-import { RateLimiter, startGateway } from '@mh/gateway';
-import { FastLane } from '@mh/fast-lane';
-import { KevClient } from '@mh/router';
-import { ContextService, Embedder } from '@mh/context';
+import { readCodexRateLimits } from '@ih/adapters';
+import { Store } from '@ih/db';
+import { RateLimiter, startGateway } from '@ih/gateway';
+import { FastLane } from '@ih/fast-lane';
+import { KevClient } from '@ih/router';
+import { ContextService, Embedder } from '@ih/context';
 import { Approvals } from './approvals.ts';
 import { authOptionsFromEnv, loadApiToken } from './auth.ts';
 import { BestOf } from './bestof.ts';
@@ -16,16 +16,27 @@ import { shellInstaller } from './installer.ts';
 import { startCapture } from './context.ts';
 import { CouncilRunner } from './council.ts';
 import { loadConfig } from './config.ts';
+import { repairMovedWorktrees } from './legacy.ts';
 import { Live } from './live.ts';
 import { Refinery } from './refinery.ts';
 import { Runner } from './runner.ts';
+import { PoolHealth } from './health.ts';
+import { FinalSummary } from './final-summary.ts';
 import { Scheduler, lockoutUntil } from './scheduler.ts';
 import { buildServer } from './server.ts';
+import { loadIdentity } from './federation/identity.ts';
+import { buildFedServer } from './federation/routes.ts';
+import { Federation } from './federation/service.ts';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const config = loadConfig(root);
 const store = new Store(config.dbFile);
 const live = new Live();
+if (config.legacy?.moved) {
+  // Cards remember their worktree by path, and git remembers where each worktree lives: point both at the new folder.
+  const fixed = await repairMovedWorktrees(store, config.legacy);
+  console.log(`upgrade: ${fixed.cards} card path${fixed.cards === 1 ? '' : 's'} updated, worktrees repaired in ${fixed.repos} repositor${fixed.repos === 1 ? 'y' : 'ies'}`);
+}
 
 const limiter = new RateLimiter();
 for (const pool of config.gateway.pools) limiter.configure(pool.id, pool.limits);
@@ -45,6 +56,10 @@ const gateway = await startGateway({
   },
 });
 
+// Swarm federation (Phase 7); assigned below, once the scheduler it needs exists.
+let federation: Federation | null = null;
+// Pool health (is the model answering); built just after the runner, which it asks to probe harnesses.
+let health: PoolHealth | null = null;
 const runner = new Runner(store, config, {
   onClaudeRateLimits: (rl) =>
     limiter.report('claude', [
@@ -53,10 +68,26 @@ const runner = new Runner(store, config, {
     ]),
   // Subscription pools have no usage API we can read; an observed lockout locks the pool until it lifts (§5.10).
   onPoolError: (poolId, message) => limiter.lock(poolId, lockoutUntil(message)),
+  onProviderDown: (poolId, message) => void health?.suspect(poolId, message).catch(() => {}),
   caps: (boardId) => store.getSettings(boardId),
   telemetryEndpoint: `http://127.0.0.1:${config.port}`,
+  peerLines: () => federation?.promptLines() ?? [],
 });
 soleSession = (poolId) => runner.soleSession(poolId);
+health = new PoolHealth({
+  store,
+  pools: config.pools,
+  upstreams: config.gateway.pools.map((u) => ({ id: u.id, baseUrl: u.baseUrl, apiKey: u.apiKey })),
+  probeHarness: (poolId) => runner.models(poolId, true),
+  // Said once to every board, in "Messages for you": the pool is out until a person turns it back on.
+  notify: (poolId, reason) => {
+    const label = config.pools.find((p) => p.id === poolId)?.label ?? poolId;
+    runner.evictPool(poolId, reason);
+    for (const board of store.listBoards()) {
+      store.postMessage({ boardId: board.id, fromActor: 'daemon:health', toCard: null, body: `${label} stopped answering and was taken out of rotation (${reason}). It stays out until you turn it back on in Agents; this is not held against the model.`, urgent: false });
+    }
+  },
+});
 
 // Codex publishes its 5-hour and weekly usage (its /status); poll it into the same limiter Claude's feed.
 if (config.binaries.codex && config.binaries.codexAcp) {
@@ -108,7 +139,9 @@ if (recovered.sessions || recovered.requeued.length || recovered.blocked.length)
 }
 const approvals = new Approvals({ store, runner, fastLane, installer: shellInstaller(config.agentEnv) });
 const bridge = new IdeBridge();
-const scheduler = new Scheduler({ store, runner, limiter, pools: config.pools, kev, fastLane, budgets, approvals });
+const scheduler = new Scheduler({ store, runner, limiter, pools: config.pools, kev, fastLane, budgets, approvals, health, hold: (card) => federation?.holdReason(card) ?? null });
+const finalSummary = new FinalSummary({ store, context, startTask: (boardId, title, description, prompt) => scheduler.startTask(boardId, title, description, prompt) });
+finalSummary.start();
 const bestOf = new BestOf({ store, runner, scheduler, kev });
 scheduler.setBestOf(bestOf);
 scheduler.start();
@@ -117,15 +150,45 @@ const refinery = new Refinery({ store, runner, scheduler, config, fastLane, cont
 refinery.start();
 const council = new CouncilRunner({ store, runner, scheduler, kev, context });
 council.start();
+// Federation: this swarm's identity (kept with the database, so a second instance gets its own) and the listener peers call.
+federation = new Federation({
+  store,
+  identity: loadIdentity(join(dirname(config.dbFile), 'swarm-key.json')),
+  fastLane,
+  port: config.fedPort ?? null,
+  pollMs: process.env.IH_FED_POLL_MS ? Number(process.env.IH_FED_POLL_MS) : undefined,
+  startGoal: (boardId, title, description) =>
+    council.members(boardId).length >= 2 && store.getBoard(boardId)?.mode !== 'direct' ? council.startGoal(boardId, title, description) : scheduler.startGoal(boardId, title, description),
+  runOrchestrator: (boardId, title, prompt) => scheduler.startTask(boardId, title, 'Writes the project card other swarms will read.', prompt),
+  cancelCard: (cardId) => void runner.cancel(cardId).catch(() => {}),
+  requestApproval: (req) => approvals.request({ ...req, kind: 'peer_request' }),
+  wake: (cardId) => runner.deliver(cardId),
+});
+approvals.setFederation(federation);
+federation.start();
+let fedApp = config.fedPort ? await buildFedServer(federation) : null;
+if (fedApp) {
+  try {
+    await fedApp.listen({ host: '127.0.0.1', port: config.fedPort! });
+  } catch (err) {
+    // A second instance on the same machine needs its own IH_FED_PORT; the rest of the daemon runs without federation.
+    console.warn(`federation listener could not start on ${config.fedPort}: ${(err as Error).message} (set IH_FED_PORT to a free port, or IH_FED_PORT=off)`);
+    await fedApp.close().catch(() => {});
+    fedApp = null;
+    federation.port = null;
+  }
+}
 const apiTokenFile = join(config.dataDir, 'api-token');
 const auth = authOptionsFromEnv(loadApiToken(apiTokenFile), config.host);
-const app = await buildServer({ store, runner, config, live, limiter, scheduler, context, fastLane, council, refinery, budgets, approvals, bridge, auth });
+const app = await buildServer({ store, runner, config, live, limiter, scheduler, context, fastLane, council, refinery, budgets, approvals, bridge, federation, auth, health });
 
 await app.listen({ host: config.host, port: config.port });
+health.start();
 // Probe each harness for its models in the background, so the UI's model pickers are ready when opened.
 for (const pool of config.pools) runner.models(pool.id).catch((err: Error) => console.warn(`models for ${pool.id}: ${err.message}`));
-console.log(`meta-harness daemon on http://${config.host}:${config.port}`);
+console.log(`infinity-harness daemon on http://${config.host}:${config.port}`);
 console.log(`api access: ${auth.requireToken ? 'token required for every client' : 'token required from other machines'}${auth.loopbackBound ? '' : ' (listening beyond loopback)'}; token in ${apiTokenFile}`);
+console.log(`swarm ${federation.self().name} (${federation.identity.swarmId}), fingerprint ${federation.identity.fingerprint}; federation ${fedApp ? `listening on 127.0.0.1:${config.fedPort} (signed /fed routes only)` : 'off'}`);
 console.log(`gateway on ${gateway.url} for ${config.gateway.pools.map((p) => p.id).join(', ') || 'no API pools'}`);
 console.log(`pools: ${config.pools.map((p) => `${p.id} (${p.model})`).join(', ') || 'none — check .env'}`);
 console.log(`github: ${config.binaries.gh ? `gh at ${config.binaries.gh}` : 'gh not found (cards land locally)'}`);
@@ -142,6 +205,8 @@ async function shutdown() {
   budgets.stop();
   history.stop();
   council.stop();
+  federation?.stop();
+  await fedApp?.close().catch(() => {});
   stopCapture();
   clearInterval(backfill);
   runner.shutdown();

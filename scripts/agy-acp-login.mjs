@@ -5,7 +5,9 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const bin = fileURLToPath(new URL('../.meta-harness/bin/agy-acp/agy_acp_server.par', import.meta.url));
+// (An install from before the rename still has its server under .meta-harness until the daemon first starts.)
+const under = (dir) => fileURLToPath(new URL(`../${dir}/bin/agy-acp/agy_acp_server.par`, import.meta.url));
+const bin = existsSync(under('.infinity-harness')) ? under('.infinity-harness') : under('.meta-harness');
 if (!existsSync(bin)) {
   console.error('agy ACP server not installed; run scripts/install-agy-acp.sh first');
   process.exit(1);

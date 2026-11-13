@@ -295,3 +295,25 @@ export function readNotification(text: string): string | null {
   const line = text.replace(/```[a-z]*\n?|```/g, '').replace(/^["'\s]+|["'\s]+$/g, '').replace(/\s+/g, ' ');
   return line.length >= 8 ? line.slice(0, 280) : null;
 }
+
+/** Job: wording for a project card other swarms will read, from facts taken from the repository's own files. */
+export function projectCardJob(facts: string): Job {
+  return {
+    name: 'project-card',
+    priority: 4,
+    system:
+      'You describe a software project for the coding agents of OTHER teams, who must decide whether this project is the one that owns a piece of software they depend on. Use only the facts given; never invent package names, features or URLs. Reply with a JSON object: {"one_line": "one sentence (max 160 characters) saying what the project is", "about": "a plain paragraph (max 900 characters): what it does, who uses it, how it is built"}. No markdown.',
+    input: facts,
+    maxInputChars: 12000,
+    maxTokens: 500,
+    json: true,
+  };
+}
+
+export function readProjectCard(text: string): { oneLine: string; about: string } | null {
+  const j = parseJsonObject(text);
+  if (!j || typeof j.one_line !== 'string' || typeof j.about !== 'string') return null;
+  const oneLine = j.one_line.replace(/\s+/g, ' ').trim().slice(0, 200);
+  const about = j.about.trim().slice(0, 1500);
+  return oneLine && about ? { oneLine, about } : null;
+}

@@ -9,7 +9,7 @@ export class HttpError extends Error {
 export interface HttpOptions {
   /** The daemon's address, e.g. `http://127.0.0.1:7420`. In a browser: `location.origin`. */
   baseUrl: string;
-  /** The API token. Not needed for a daemon on this machine unless it was started with MH_REQUIRE_TOKEN=1. */
+  /** The API token. Not needed for a daemon on this machine unless it was started with IH_REQUIRE_TOKEN=1. */
   token?: string;
   /** Read the token when a request is made (the web UI keeps it in browser storage). Wins over `token`. */
   tokenProvider?: () => string;

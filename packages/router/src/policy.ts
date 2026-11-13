@@ -1,4 +1,4 @@
-import { ruleMatches, type AgentProfile, type CardRole, type Classification, type Pool, type RoutingRules, type Settings, type Skill } from '@mh/core';
+import { ruleMatches, type AgentProfile, type CardRole, type Classification, type Pool, type RoutingRules, type Settings, type Skill } from '@ih/core';
 import { priorFor, priorSuccess } from './priors.ts';
 
 export * from './priors.ts';
@@ -17,6 +17,8 @@ export interface PoolView {
   running: number;
   /** The agent's spending budget, when it has one (Phase 6.3): halted agents get no cards, warning ones rank lower. */
   budget?: { state: 'open' | 'warn' | 'halted' | 'locked'; pct: number } | null;
+  /** Why the pool is out of rotation (its endpoint stopped answering); it stays out until a person puts it back. */
+  offline?: string | null;
 }
 
 export interface RouteRequest {
@@ -63,19 +65,22 @@ const round = (n: number) => Math.round(n * 1000) / 1000;
 
 /**
  * Ranks agents for a card (master plan §5.4 steps 3–4). Deterministic: role → rules → capability → free slot →
- * pool state → Claude/Codex reserve; then score = success × headroom × scarcity × load. Slots, state and scarcity belong
+ * pool state → Claude/Codex reserve; then score = success × headroom × scarcity × load × the operator's weight for the agent. Slots, state and scarcity belong
  * to the agent's pool, which its agents share. Eligible agents come first.
  */
 export function rankPools(req: RouteRequest): Candidate[] {
   const { classification: c, routing, settings } = req;
   const role = req.role ?? 'worker';
   const skill: Skill = req.skill ?? c.workType;
-  const out: Candidate[] = req.pools.map(({ pool, agent: profile, state, topPct, fiveHourPct, running, budget }) => {
+  const out: Candidate[] = req.pools.map(({ pool, agent: profile, state, topPct, fiveHourPct, running, budget, offline }) => {
     const agent = profile ?? { id: pool.id, poolId: pool.id, model: '', role: 'worker', delegatesTo: [], enabled: true };
     const base = { agentId: agent.id, poolId: pool.id, model: agent.model || pool.model };
     const reasons: string[] = [];
     const slots = settings.poolSlots[pool.id] ?? 1;
     if (!agent.enabled) reasons.push('agent disabled');
+    const asked = settings.agentWeights?.[agent.id];
+    const weight = typeof asked === 'number' && Number.isFinite(asked) ? Math.min(10, Math.max(0, asked)) : 1;
+    if (weight === 0) reasons.push('weight 0 (switched off for automatic routing)');
     if (agent.role !== role) reasons.push(`takes ${agent.role} cards`);
     if (routing?.pools?.length && !routing.pools.some((e) => ruleMatches(e, agent))) reasons.push('not allowed by routing rules');
     if (routing?.avoid?.some((e) => ruleMatches(e, agent))) reasons.push('avoided by routing rules');
@@ -83,6 +88,7 @@ export function rankPools(req: RouteRequest): Candidate[] {
     if (skill === 'research' && prior.noWeb) reasons.push('no web access for research');
     if (HARD_CAP[pool.id] !== undefined && c.complexity > HARD_CAP[pool.id]!) reasons.push(`complexity ${c.complexity.toFixed(1)} too high`);
     if (running >= slots) reasons.push(`all ${slots} slot(s) busy`);
+    if (offline) reasons.push(`offline: ${offline} (turn it back on in Agents)`);
     if (state === 'halted' || state === 'locked') reasons.push(`pool ${state}`);
     if (budget?.state === 'halted') reasons.push(`budget used up (${budget.pct}%)`);
     // Codex's shell has no network (Phase 6.2): cards that install or download go elsewhere.
@@ -102,7 +108,9 @@ export function rankPools(req: RouteRequest): Candidate[] {
     const load = 1 - (running / slots) * 0.5;
     const preferred = req.preferredPool && ruleMatches(req.preferredPool, agent) ? 1.25 : 1;
     const failed = req.failedAgents?.includes(agent.id) ? 0.2 : 1;
-    const score = success * headroom * scarcity * load * preferred * failed;
+    // A boost only counts for cards the agent handles well, so favouring a cheap agent does not send it the hard ones.
+    const boosted = weight > 1 && c.complexity > prior.capability ? 1 : weight;
+    const score = success * headroom * scarcity * load * preferred * failed * boosted;
     reasons.push(
       seen && seen.n > 0
         ? `success ${round(success)} (prior ${round(expected)} ${prior.family}, observed ${round(seen.rate)} n=${seen.n})`
@@ -110,6 +118,7 @@ export function rankPools(req: RouteRequest): Candidate[] {
       `headroom ${round(headroom)}${state === 'warn' ? ' (warn)' : ''}${budget?.state === 'warn' ? ' (budget warn)' : ''}`,
       `scarcity ${scarcity}`,
       `load ${round(load)}`,
+      ...(weight !== 1 ? [boosted === weight ? `weight ×${weight}` : `weight ×${weight} (not applied: complexity ${c.complexity.toFixed(1)} is above what it handles well)`] : []),
       ...(preferred > 1 ? ['previous agent'] : []),
       ...(failed < 1 ? ['failed this card before'] : []),
     );

@@ -3,9 +3,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { slugify } from '@mh/core';
-import type { AgentProfile } from '@mh/core';
-import { KevClient } from '@mh/router';
+import { slugify } from '@ih/core';
+import type { AgentProfile } from '@ih/core';
+import { KevClient } from '@ih/router';
 import { git } from '../src/git.ts';
 import { setup, waitFor } from './harness.ts';
 
@@ -80,7 +80,7 @@ test('best-of-N: two agents race a card, Kev picks the better diff, the loser is
     // The loser: done, no branch, no worktree, its branch deleted; a low outcome is recorded for its agent.
     await until(() => store.getCard(lost.id)!.status === 'done' && store.getCard(lost.id)!.branch === null);
     const dir = join(cfg.worktreesDir, board.id, lost.id);
-    const branch = `mh/${slugify(lost.title)}-${lost.id.slice(-4)}`;
+    const branch = `ih/${slugify(lost.title)}-${lost.id.slice(-4)}`;
     assert.equal(existsSync(dir), false, 'its worktree is gone');
     assert.equal((await git(repo, ['branch', '--list', branch])).trim(), '', 'and its branch');
     assert.ok(store.listSessions(lost.id).length > 0, 'it did run');
@@ -126,7 +126,7 @@ test('a card still racing can’t be reviewed or landed by hand', async () => {
   const { store, refinery, board, close } = await setup({ kev });
   try {
     const card = store.createCard({ boardId: board.id, title: 'Racing', status: 'review' });
-    store.updateCard(card.id, { branch: 'mh/x', pipeline: { bestOf: { group: card.id, candidate: 1, of: 2, state: 'running' } } });
+    store.updateCard(card.id, { branch: 'ih/x', pipeline: { bestOf: { group: card.id, candidate: 1, of: 2, state: 'running' } } });
     assert.throws(() => refinery.humanVerdict(card.id, 'approve', ''), /still racing/);
     assert.throws(() => refinery.landNow(card.id), /still racing/);
   } finally {

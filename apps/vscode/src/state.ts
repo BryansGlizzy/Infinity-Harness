@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { Approval, Board, Card, DaemonEvent, LiveMessage, Message, Outcome } from '@mh/core';
+import type { Approval, Board, Card, DaemonEvent, FederationNeeds, LiveMessage, Message, Outcome } from '@ih/core';
 import { DaemonClient, EventStream, type PoolSummary, type UsageSummary } from './client.ts';
 import { boardsForFolders } from './match.ts';
 
@@ -29,6 +29,8 @@ export class HarnessModel implements vscode.Disposable {
   terminals = new Set<string>();
   /** Requests waiting for a decision: escalations, new agents, MCP servers, skills, tool grants. */
   approvals: Approval[] = [];
+  /** Swarms that knocked and peer requests waiting for a decision (Phase 7). */
+  federation: FederationNeeds = { knocks: [], requests: [], replies: [] };
   /** Pools with their live state, and today's usage and budgets, for the status bar tooltip. */
   pools: PoolSummary[] = [];
   usage: UsageSummary | null = null;
@@ -106,13 +108,14 @@ export class HarnessModel implements vscode.Disposable {
       const id = this.board.id;
       const [cards, messages, pending] = await Promise.all([this.client.cards(id), this.client.messages(id), this.client.pendingOutcomes(id)]);
       this.cards = cards;
-      this.inbox = messages.filter((m) => m.toCard === null && !m.fromActor.startsWith('user:'));
+      this.inbox = messages.filter((m) => m.toCard === null && !m.fromActor.startsWith('user:') && !m.dismissedAt);
       this.pending = pending;
       // Newer daemon endpoints: a daemon without them just shows less.
-      [this.approvals, this.pools, this.usage] = await Promise.all([
+      [this.approvals, this.pools, this.usage, this.federation] = await Promise.all([
         this.client.approvals(id).catch(() => []),
         this.client.pools().catch(() => []),
         this.client.usage(id, 24).catch(() => null),
+        this.client.federationNeeds().catch((): FederationNeeds => ({ knocks: [], requests: [], replies: [] })),
       ]);
       // Which running cards have a terminal to attach (Claude sessions).
       const running = cards.filter((c) => c.status === 'in_progress' && c.poolId === 'claude');
@@ -143,6 +146,12 @@ export class HarnessModel implements vscode.Disposable {
     if ('live' in e) return;
     if (!this.board) {
       if (e.type === 'board.created') this.soon();
+      return;
+    }
+    // Peers and their requests belong to the swarm, not to a board.
+    if (e.type === 'peer.updated' || e.type === 'request.updated') {
+      this.eventEmitter.fire(e);
+      this.soon();
       return;
     }
     const mine =

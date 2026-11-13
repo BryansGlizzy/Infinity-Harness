@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-const daemon = `http://127.0.0.1:${process.env.MH_PORT ?? 7420}`;
+const daemon = `http://127.0.0.1:${process.env.IH_PORT ?? 7420}`;
 
 export default defineConfig({
   plugins: [react()],

@@ -1,5 +1,5 @@
 {
-  "name": "@mh/db",
+  "name": "@ih/db",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,6 +7,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@mh/core": "workspace:*"
+    "@ih/core": "workspace:*"
   }
 }

@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import type { Card, DaemonEvent } from '@mh/core';
-import { Store } from '@mh/db';
-import { AcpAgent } from '@mh/adapters';
-import { RateLimiter } from '@mh/gateway';
-import { FastLane } from '@mh/fast-lane';
-import { KevClient } from '@mh/router';
-import { ContextService } from '@mh/context';
+import type { Card, DaemonEvent } from '@ih/core';
+import { Store } from '@ih/db';
+import { AcpAgent } from '@ih/adapters';
+import { RateLimiter } from '@ih/gateway';
+import { FastLane } from '@ih/fast-lane';
+import { KevClient } from '@ih/router';
+import { ContextService } from '@ih/context';
 import { Approvals } from '../src/approvals.ts';
 import type { AuthOptions } from '../src/auth.ts';
 import { BestOf } from '../src/bestof.ts';
@@ -24,8 +24,12 @@ import { Live } from '../src/live.ts';
 import { Runner } from '../src/runner.ts';
 import { Refinery } from '../src/refinery.ts';
 import { Scheduler, lockoutUntil } from '../src/scheduler.ts';
+import { PoolHealth } from '../src/health.ts';
 import type { GitHub } from '../src/github.ts';
 import { buildServer } from '../src/server.ts';
+import { generateIdentity } from '../src/federation/identity.ts';
+import { buildFedServer } from '../src/federation/routes.ts';
+import { Federation } from '../src/federation/service.ts';
 
 const fakeAgent = fileURLToPath(new URL('../../../packages/adapters/test/fake-agent.mjs', import.meta.url));
 
@@ -65,7 +69,7 @@ export const laneStub = () =>
   });
 
 export async function tempRepo(): Promise<string> {
-  const repo = mkdtempSync(join(tmpdir(), 'mh-repo-'));
+  const repo = mkdtempSync(join(tmpdir(), 'ih-repo-'));
   await git(repo, ['init', '-q', '-b', 'main']);
   writeFileSync(join(repo, 'README.md'), '# demo\n');
   await commitAll(repo, 'init');
@@ -88,9 +92,9 @@ export function fakeInstaller(have: Set<string> = new Set()) {
   };
 }
 
-export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>; kev?: KevClient | null; lane?: FastLane | null; github?: GitHub | null; outcomeKev?: KevClient | null; webDist?: string; auth?: AuthOptions } = {}) {
+export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>; kev?: KevClient | null; lane?: FastLane | null; github?: GitHub | null; outcomeKev?: KevClient | null; webDist?: string; auth?: AuthOptions; federation?: boolean } = {}) {
   const repo = await tempRepo();
-  const dataDir = mkdtempSync(join(tmpdir(), 'mh-data-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'ih-data-'));
   const cfg: DaemonConfig = {
     root: dataDir,
     dataDir,
@@ -121,7 +125,9 @@ export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>
   const budgets = new Budgets({ store, limiter });
   const approvals = new Approvals({ store, runner, fastLane: opts.lane ?? null, installer: opts.installer ?? null });
   const bridge = new IdeBridge();
-  const scheduler = new Scheduler({ store, runner, limiter, pools: cfg.pools, kev: opts.kev ?? null, fastLane: opts.lane ?? null, budgets, approvals, tickMs: 100 });
+  let federationRef: Federation | null = null;
+  const health = new PoolHealth({ store, pools: cfg.pools, upstreams: [], probeHarness: async () => [] });
+  const scheduler = new Scheduler({ store, runner, limiter, pools: cfg.pools, health, kev: opts.kev ?? null, fastLane: opts.lane ?? null, budgets, approvals, tickMs: 100, hold: (card) => federationRef?.holdReason(card) ?? null });
   // Not started: tests that race candidates call bestOf.start().
   const bestOf = new BestOf({ store, runner, scheduler, kev: opts.outcomeKev ?? opts.kev ?? null, tickMs: 100 });
   scheduler.setBestOf(bestOf);
@@ -141,7 +147,32 @@ export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>
     approvals,
   });
   const council = new CouncilRunner({ store, runner, scheduler, kev: opts.kev ?? null, context, tickMs: 100 });
-  const app = await buildServer({ store, runner, config: cfg, live: new Live(), limiter, scheduler, context, fastLane: opts.lane ?? null, council, refinery, budgets, approvals, bridge, auth: opts.auth ?? null });
+  // Swarm federation (Phase 7), when a test asks for it: its own listener on a free port, peers reached by local URL.
+  let federation: Federation | null = null;
+  let fedApp: Awaited<ReturnType<typeof buildFedServer>> | null = null;
+  let fedUrl = '';
+  if (opts.federation) {
+    federation = new Federation({
+      store,
+      identity: generateIdentity(),
+      fastLane: opts.lane ?? null,
+      eager: false,
+      pollMs: 3_600_000,
+      startGoal: (boardId, title, description) => scheduler.startGoal(boardId, title, description),
+      runOrchestrator: (boardId, title, prompt) => scheduler.startTask(boardId, title, 'Writes the project card other swarms will read.', prompt),
+      cancelCard: (cardId) => void runner.cancel(cardId).catch(() => {}),
+      requestApproval: (req) => approvals.request({ ...req, kind: 'peer_request' }),
+      wake: (cardId) => runner.deliver(cardId),
+    });
+    approvals.setFederation(federation);
+    federationRef = federation;
+    fedApp = await buildFedServer(federation);
+    await fedApp.listen({ host: '127.0.0.1', port: 0 });
+    fedUrl = `http://127.0.0.1:${(fedApp.server.address() as AddressInfo).port}`;
+    federation.port = (fedApp.server.address() as AddressInfo).port;
+    federation.start();
+  }
+  const app = await buildServer({ store, runner, config: cfg, live: new Live(), limiter, scheduler, context, fastLane: opts.lane ?? null, council, refinery, budgets, approvals, bridge, federation, auth: opts.auth ?? null, health });
   await app.listen({ host: '127.0.0.1', port: 0 });
   cfg.port = (app.server.address() as AddressInfo).port;
   const board = store.createBoard({ name: 'Demo', repoPath: repo, defaultBranch: 'main' });
@@ -153,11 +184,13 @@ export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>
     budgets.stop();
     council.stop();
     stopCapture();
+    federation?.stop();
     runner.shutdown();
     await context.idle();
     await app.close();
+    await fedApp?.close();
   };
-  return { repo, store, runner, limiter, scheduler, refinery, context, council, budgets, approvals, bridge, bestOf, board, cfg, close };
+  return { repo, store, runner, limiter, health, scheduler, refinery, context, council, budgets, approvals, bridge, bestOf, board, cfg, federation, fedUrl, close };
 }
 
 export function waitFor(store: Store, predicate: (e: DaemonEvent) => boolean, ms = 15_000): Promise<DaemonEvent> {

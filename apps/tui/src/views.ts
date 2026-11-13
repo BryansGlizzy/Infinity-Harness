@@ -1,8 +1,9 @@
 // What each screen looks like. Pure drawing: the state in, cells and click regions out.
-import type { Need } from '@mh/client';
-import { CARD_STATUSES, type Card, type CardStatus } from '@mh/core';
+import type { Need, PoolWithStatus } from '@ih/client';
+import { CARD_STATUSES, type Card, type CardStatus } from '@ih/core';
+import type { FileEntry } from '@ih/core';
 import { Canvas, fit, wrap, type Style } from './canvas.ts';
-import { VIEWS, type AppState, type View } from './state.ts';
+import { VIEWS, type AppState, type FilesState, type View } from './state.ts';
 
 export const HEADER = 0;
 export const TABS = 1;
@@ -19,7 +20,7 @@ export interface Action {
   bad?: boolean;
 }
 
-const KIND_LABEL: Record<Need['kind'], string> = { approval: 'approve', review: 'review', blocked: 'blocked', outcome: 'weigh', message: 'message' };
+const KIND_LABEL: Record<Need['kind'], string> = { approval: 'approve', review: 'review', blocked: 'blocked', outcome: 'weigh', message: 'message', peer: 'swarm', peer_request: 'request', peer_reply: 'reply' };
 const STATUS_TITLE: Record<CardStatus, string> = { backlog: 'Backlog', ready: 'Ready', in_progress: 'In progress', review: 'Review', merging: 'Merging', done: 'Done', blocked: 'Blocked' };
 /** What needs a person first. */
 export const BOARD_ORDER: CardStatus[] = ['blocked', 'review', 'in_progress', 'merging', 'ready', 'backlog', 'done'];
@@ -37,9 +38,30 @@ export function needActions(n: Need): Action[] {
       return [{ id: 'open', label: 'Open card', key: 'o' }, { id: 'message', label: 'Message', key: 'm' }, { id: 'retry', label: 'Retry', key: 'y' }];
     case 'outcome':
       return [{ id: 'pass', label: 'Fine', key: 'p' }, { id: 'fail', label: 'Was wrong', key: 'f', bad: true }, { id: 'ignore', label: 'Ignore', key: 'i' }];
+    case 'peer':
+      return [{ id: 'peer-approve', label: 'Accept swarm', key: 'a' }, { id: 'peer-deny', label: 'Deny', key: 'd', bad: true }, { id: 'peer-block', label: 'Block', key: 'b', bad: true }];
+    case 'peer_request':
+      return [{ id: 'req-approve', label: 'Approve', key: 'a' }, { id: 'req-ask', label: 'Ask a question', key: 'q' }, { id: 'req-decline', label: 'Decline', key: 'd', bad: true }];
+    case 'peer_reply':
+      return n.title.includes(' asks about ')
+        ? [{ id: 'reply-answer', label: 'Answer', key: 'a' }]
+        : [{ id: 'reply-confirm', label: 'It works', key: 'a' }, { id: 'reply-reopen', label: 'Send back', key: 'r', bad: true }];
     case 'message':
-      return [...(n.cardId ? [{ id: 'open', label: 'Open card', key: 'o' }, { id: 'message', label: 'Reply', key: 'm' }] : [])];
+      return [...(n.cardId ? [{ id: 'open', label: 'Open card', key: 'o' }, { id: 'message', label: 'Reply', key: 'm' }] : []), { id: 'clear', label: 'Clear', key: 'x' }, { id: 'clear-all', label: 'Clear all messages', key: 'X' }];
   }
+}
+
+/** What can be done with a pool: check whether its model answers, and put it back after it was taken out of rotation. */
+export function poolActions(p: PoolWithStatus): Action[] {
+  return [{ id: 'pool-test', label: 'Test', key: 't' }, ...(p.health?.ejected ? [{ id: 'pool-restore', label: 'Put back in rotation', key: 'b' }] : [])];
+}
+
+/** One word for whether the pool's model is answering. */
+export function poolHealthText(p: PoolWithStatus): string {
+  const h = p.health;
+  if (!h) return '';
+  if (h.ejected) return 'out of rotation';
+  return h.reachable === 'online' ? `online${h.latencyMs !== null ? ` ${h.latencyMs}ms` : ''}` : h.reachable === 'offline' ? 'no response' : '';
 }
 
 export type BoardRow = { kind: 'header'; status: CardStatus; count: number; folded: boolean } | { kind: 'card'; card: Card };
@@ -90,6 +112,7 @@ export function draw(c: Canvas, s: AppState): void {
   const bodyH = c.height - BODY_TOP - BOTTOM;
   if (s.view === 'needs') drawNeeds(c, s, bodyH, online);
   else if (s.view === 'board') drawBoard(c, s, bodyH);
+  else if (s.view === 'files') drawFiles(c, s, bodyH);
   else drawPools(c, s, bodyH);
   if (!online) c.dim(0, BODY_TOP, c.width, bodyH);
   drawFooter(c, s);
@@ -218,6 +241,56 @@ function drawBoard(c: Canvas, s: AppState, bodyH: number) {
   });
 }
 
+/** The visible rows of the file tree: each entry of an open folder, in order, with how deep it is. */
+export function fileRows(files: FilesState): { entry: FileEntry; depth: number }[] {
+  const out: { entry: FileEntry; depth: number }[] = [];
+  const walk = (path: string, depth: number) => {
+    for (const entry of files.dirs[path]?.entries ?? []) {
+      out.push({ entry, depth });
+      if (entry.type === 'dir' && files.expanded.has(entry.path)) walk(entry.path, depth + 1);
+    }
+  };
+  walk('', 0);
+  return out;
+}
+
+const FILE_MARK: Record<string, Style> = { M: { fg: 'yellow' }, A: { fg: 'green' }, U: { fg: 'green' }, D: { fg: 'red' } };
+
+function drawFiles(c: Canvas, s: AppState, bodyH: number) {
+  if (!s.snap.board) {
+    c.put(2, BODY_TOP + 1, 'There are no boards on this machine yet.', { dim: true });
+    return;
+  }
+  const root = s.files.dirs[''];
+  if (!root) {
+    c.put(2, BODY_TOP + 1, 'Loading…', { dim: true });
+    return;
+  }
+  if (root.error) {
+    c.put(2, BODY_TOP + 1, fit(root.error, c.width - 4), { fg: 'red' });
+    return;
+  }
+  const rows = fileRows(s.files);
+  if (!rows.length) {
+    c.put(2, BODY_TOP + 1, 'This folder is empty.', { dim: true });
+    return;
+  }
+  list(c, s, 'files', bodyH, rows.length, (i, y, selected) => {
+    const { entry, depth } = rows[i]!;
+    const st: Style | undefined = selected ? { inverse: true } : undefined;
+    const open = entry.type === 'dir' && s.files.expanded.has(entry.path);
+    const x = 2 + depth * 2;
+    const mark = entry.status ? (entry.type === 'dir' ? '•' : entry.status) : '';
+    const label = `${entry.type === 'dir' ? (open ? '▾ ' : '▸ ') : '  '}${entry.name}${entry.type === 'dir' ? '/' : ''}`;
+    c.put(x, y, fit(label, c.width - x - 3), { ...st, bold: entry.type === 'dir', dim: entry.type === 'link' && !selected });
+    if (mark) c.put(c.width - 3, y, mark, selected ? { inverse: true } : FILE_MARK[entry.status!]);
+    if (open) {
+      const child = s.files.dirs[entry.path];
+      if (child?.error) c.put(c.width - 2 - Math.min(40, child.error.length), y, fit(child.error, 40), { fg: 'red' });
+    }
+  });
+}
+
 function bar(pct: number, width: number): string {
   const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
   return '▓'.repeat(filled) + '░'.repeat(width - filled);
@@ -234,14 +307,25 @@ function drawPools(c: Canvas, s: AppState, bodyH: number) {
     const st: Style | undefined = selected ? { inverse: true } : undefined;
     const top = p.status.windows.reduce<{ window: string; pct: number } | undefined>((a, w) => (!a || w.pct > a.pct ? w : a), undefined);
     c.put(2, y, p.id.padEnd(8), { ...st, bold: true });
-    c.put(11, y, p.status.state.padEnd(7), { ...st, fg: POOL_COLOR[p.status.state] });
+    c.put(11, y, (p.health?.ejected ? 'OUT' : p.status.state).padEnd(7), { ...st, fg: p.health?.ejected ? 'red' : POOL_COLOR[p.status.state] });
     const barW = Math.max(6, Math.min(20, c.width - 50));
     c.put(19, y, bar(top?.pct ?? 0, barW), st);
-    const detail = p.status.windows.map((w) => `${w.window} ${Math.round(w.pct)}%`).join('  ');
+    const health = poolHealthText(p);
+    const detail = [health, ...p.status.windows.map((w) => `${w.window} ${Math.round(w.pct)}%`)].filter(Boolean).join('  ');
     c.put(19 + barW + 1, y, fit(`${detail}${p.running ? `  ${p.running} running` : ''}`, c.width - barW - 22), { ...st, dim: !selected });
   });
+  // The selected pool: why it is out, if it is, and what can be done about it.
+  const chosen = pools[s.sel.pools];
+  const listEnd = BODY_TOP + Math.min(bodyH, pools.length) + 1;
+  if (chosen && listEnd + 1 < BODY_TOP + bodyH) {
+    const h = chosen.health;
+    const why = h?.ejected ? `Out since ${new Date(h.ejected.since).toLocaleTimeString()}: ${h.ejected.reason}. Not held against the model.` : h?.detail ?? `${chosen.label}${h ? `: ${poolHealthText(chosen) || 'not checked yet'}` : ''}`;
+    c.put(2, listEnd, fit(why, c.width - 4), { fg: h?.ejected || h?.reachable === 'offline' ? 'red' : undefined, dim: !h?.ejected && h?.reachable !== 'offline' });
+    let bx = 2;
+    for (const a of poolActions(chosen)) bx += c.button(bx, listEnd + 1, `${a.label} ${a.key}`, `pool:${a.id}`) + 1;
+  }
   const usage = s.snap.usage;
-  const y = BODY_TOP + Math.min(bodyH, pools.length) + 1;
+  const y = listEnd + 3;
   if (usage && y < BODY_TOP + bodyH) {
     c.put(2, y, `Last ${usage.hours}h: ${usage.totals.tokens.toLocaleString()} tokens · $${usage.totals.costUsd.toFixed(2)} · ${usage.totals.requests} requests`, { dim: true });
     usage.budgets.slice(0, bodyH - pools.length - 2).forEach((b, i) => {
@@ -276,7 +360,7 @@ function modalBox(c: Canvas, x: number, y: number, w: number, h: number, title: 
 
 function drawModal(c: Canvas, s: AppState) {
   const m = s.modal!;
-  const w = Math.min(c.width - 2, m.kind === 'card' ? 78 : 62);
+  const w = Math.min(c.width - 2, m.kind === 'file' ? 110 : m.kind === 'card' ? 78 : 62);
   const x = Math.floor((c.width - w) / 2);
   c.region(0, 0, c.width, c.height, 'modal:backdrop');
   c.dim(0, 0, c.width, c.height);
@@ -285,9 +369,11 @@ function drawModal(c: Canvas, s: AppState) {
       'Click anything. Keys are shown on the buttons.',
       '',
       '↑ ↓ j k   move        PgUp PgDn   page         wheel   scroll',
-      'Tab  1 2 3   switch screen        Enter   open the selected item',
+      'Tab  1 2 3 4   switch screen      Enter   open the selected item',
+      '→ ←  (Files) open or close a folder       Enter on a file   read it',
       'a  approve / answer     d  deny     o  open card     m  message',
       'c  request changes     y  retry     p f i  weigh a result',
+      'x  clear a message     X  clear them all     (Pools)  t  test the model   b  put it back in rotation',
       'M  switch machine      B  switch board           r  refresh',
       'f  (on Board) fold a column        q  quit  (Ctrl+C too)',
     ];
@@ -321,6 +407,29 @@ function drawModal(c: Canvas, s: AppState) {
       if (!item.disabled) c.region(inner.x, inner.y + i, inner.w, 1, `menu:${i}`);
     });
     c.button(inner.x, y + h - 2, 'Close esc', 'modal:close');
+    return;
+  }
+  if (m.kind === 'file') {
+    const h = c.height - 2;
+    const y = 1;
+    const inner = modalBox(c, x, y, w, h, fit(m.path, w - 18));
+    if (m.error) c.put(inner.x, inner.y, fit(m.error, inner.w), { fg: 'red' });
+    else if (!m.data) c.put(inner.x, inner.y, 'Loading…', { dim: true });
+    else if (m.data.binary) c.put(inner.x, inner.y, `A binary file (${m.data.size} bytes); it is not shown.`, { dim: true });
+    else {
+      const lines = m.data.content.split('\n');
+      if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop(); // the newline that ends the last line is not another line
+      const rows = inner.h - 2;
+      const gutter = String(lines.length).length + 1;
+      m.scroll = Math.max(0, Math.min(m.scroll, Math.max(0, lines.length - rows)));
+      lines.slice(m.scroll, m.scroll + rows).forEach((l, i) => {
+        c.put(inner.x, inner.y + i, String(m.scroll + i + 1).padStart(gutter - 1) + ' ', { dim: true });
+        c.put(inner.x + gutter, inner.y + i, fit(l.replace(/\t/g, '    '), inner.w - gutter));
+      });
+      c.region(inner.x, inner.y, inner.w, rows, 'file:text');
+      c.put(inner.x, y + h - 2, fit(`${lines.length} lines${m.data.truncated ? ' (the first megabyte)' : ''}`, 30), { dim: true });
+    }
+    c.button(inner.x + inner.w - 11, y, 'Close esc', 'modal:close');
     return;
   }
   // card

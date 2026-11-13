@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { HarnessEvent, ModelOption, ReasoningOptions } from '@mh/core';
+import type { HarnessEvent, ModelOption, ReasoningOptions } from '@ih/core';
 import { decidePermission, shellPaths } from './acp-agent.ts';
 import { Pty } from './pty.ts';
 import type { AgentSession, HarnessAdapter, PermissionDecision, SessionOptions } from './types.ts';
@@ -186,7 +186,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
     const pty = new Pty(this.opts.binary ?? join(homedir(), '.local', 'bin', 'claude'), args, {
       cwd: opts.cwd,
-      env: { ...this.opts.env, ...(opts.telemetry ? claudeTelemetryEnv(opts.telemetry) : {}), MH_HOOK_URL: this.opts.hookUrl, MH_HOOK_TOKEN: token },
+      env: { ...this.opts.env, ...(opts.telemetry ? claudeTelemetryEnv(opts.telemetry) : {}), IH_HOOK_URL: this.opts.hookUrl, IH_HOOK_TOKEN: token },
     });
 
     let markReady!: () => void;
@@ -278,7 +278,7 @@ export class ClaudeAdapter implements HarnessAdapter {
         this.opts.onRateLimits({ fiveHour: win(rl.five_hour), sevenDay: win(rl.seven_day) });
       }
       const pct = rl?.five_hour ? ` · 5h ${rl.five_hour.used_percentage}%` : '';
-      return `meta-harness${pct}`;
+      return `infinity-harness${pct}`;
     }
 
     switch (payload?.hook_event_name) {

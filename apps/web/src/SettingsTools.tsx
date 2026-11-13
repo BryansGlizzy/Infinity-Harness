@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { DEFAULT_SETTINGS, type Settings, type ToolGrant } from '@mh/core';
+import { DEFAULT_SETTINGS, type Settings, type ToolGrant } from '@ih/core';
 import { api } from './api.ts';
 import { Field, NumField, Toggle } from './SettingsFields.tsx';
 
@@ -84,6 +84,22 @@ export function ToolsTab(props: { boardId: string; settings: Settings; save: (pa
         checked={settings.humanReview}
         def={D.humanReview}
         onChange={(v) => save({ humanReview: v })}
+      />
+
+      <Toggle
+        label="Final summary when a goal is done"
+        hint="When every card of a goal is done, the orchestrator reads what was built and writes a final report: what was done, how to run and verify it, decisions, open issues, and the documentation that applies. It appears as its own card, is saved on the goal under Context, and is posted to Messages for you."
+        checked={settings.finalSummary}
+        def={D.finalSummary}
+        onChange={(v) => save({ finalSummary: v })}
+      />
+
+      <Toggle
+        label="Agents' requests to other swarms wait for me"
+        hint="Off (default): an agent that asks another swarm for something (the request_peer tool) sends it at once. On: you approve each one first."
+        checked={settings.peerRequestApproval}
+        def={D.peerRequestApproval}
+        onChange={(v) => save({ peerRequestApproval: v })}
       />
 
       <h3>Best-of-N</h3>

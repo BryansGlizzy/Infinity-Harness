@@ -1,4 +1,4 @@
-import { newId } from '@mh/core';
+import { newId } from '@ih/core';
 
 // The IDE bridge (master plan Phase 6.1, stage 2). A VS Code window bound to a board connects to `/ws/ide` and answers
 // requests the daemon sends on behalf of agents: a quick pick for the human (`ide_ask`), the language server's problems

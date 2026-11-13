@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
-import type { Store, UsageInput } from '@mh/db';
+import type { Store, UsageInput } from '@ih/db';
 
 // An OTLP/HTTP (JSON) receiver for the telemetry Claude Code exports (master plan §5.8, Phase 6.3). Claude Code counts
 // tokens (`claude_code.token.usage`, by type and model) and cost (`claude_code.cost.usage`); the resource attributes
-// the daemon set at session start (`mh.session`) say which card's agent they belong to.
+// the daemon set at session start (`ih.session`) say which card's agent they belong to.
 
 type OtlpValue = { stringValue?: string; intValue?: string | number; doubleValue?: number; boolValue?: boolean };
 type OtlpAttr = { key: string; value?: OtlpValue };
@@ -96,7 +96,7 @@ export class TelemetryIngest {
     for (const d of parseOtlpMetrics(body)) {
       const usage = this.increment(d);
       if (!usage) continue;
-      const session = this.store.getSession(d.resource['mh.session'] ?? '');
+      const session = this.store.getSession(d.resource['ih.session'] ?? '');
       const card = session ? this.store.getCard(session.cardId) : undefined;
       if (!session || !card) continue;
       this.store.recordUsage({
@@ -117,7 +117,7 @@ export class TelemetryIngest {
 
   private increment(d: Datapoint): ReturnType<typeof usageFromDatapoint> {
     if (!d.cumulative) return usageFromDatapoint(d);
-    const key = `${d.resource['mh.session']}|${d.metric}|${JSON.stringify(d.attrs)}`;
+    const key = `${d.resource['ih.session']}|${d.metric}|${JSON.stringify(d.attrs)}`;
     const before = this.last.get(key) ?? 0;
     this.last.set(key, d.value);
     return usageFromDatapoint({ ...d, value: d.value >= before ? d.value - before : d.value });

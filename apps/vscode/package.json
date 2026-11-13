@@ -86,6 +86,11 @@
     ],
     "commands": [
       {
+        "command": "infinityHarness.removeBoard",
+        "title": "Remove This Board…",
+        "category": "Infinity Harness"
+      },
+      {
         "command": "infinityHarness.plan",
         "title": "Plan a Goal…",
         "category": "Infinity Harness",
@@ -238,6 +243,45 @@
         "title": "Open Chat",
         "category": "Infinity Harness",
         "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "infinityHarness.decidePeer",
+        "title": "Decide About a Swarm That Wants to Connect…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.decidePeerRequest",
+        "title": "Decide a Request From Another Swarm…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.openSwarms",
+        "title": "Open Swarms (Peers, Shared Projects, Requests)",
+        "category": "Infinity Harness",
+        "icon": "$(broadcast)"
+      },
+      {
+        "command": "infinityHarness.decidePeerReply",
+        "title": "Answer or Check a Request You Sent to Another Swarm…",
+        "category": "Infinity Harness"
+      },
+      {
+        "command": "infinityHarness.clearMessage",
+        "title": "Clear Message",
+        "category": "Infinity Harness",
+        "icon": "$(close)"
+      },
+      {
+        "command": "infinityHarness.clearMessages",
+        "title": "Clear All Messages",
+        "category": "Infinity Harness",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "infinityHarness.pools",
+        "title": "Pools: Test, or Put Back in Rotation…",
+        "category": "Infinity Harness",
+        "icon": "$(pulse)"
       }
     ],
     "menus": {
@@ -266,6 +310,16 @@
           "command": "infinityHarness.chat.selectGoal",
           "when": "view == infinityHarness.chat",
           "group": "navigation@1"
+        },
+        {
+          "command": "infinityHarness.clearMessages",
+          "when": "view == infinityHarness.attention && infinityHarness.state == ready",
+          "group": "navigation@1"
+        },
+        {
+          "command": "infinityHarness.pools",
+          "when": "view == infinityHarness.attention && infinityHarness.state == ready",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -363,6 +417,11 @@
           "command": "infinityHarness.denyApproval",
           "when": "view == infinityHarness.attention && viewItem == approval",
           "group": "inline@2"
+        },
+        {
+          "command": "infinityHarness.clearMessage",
+          "when": "view == infinityHarness.attention && viewItem == message",
+          "group": "inline"
         }
       ],
       "editor/context": [
@@ -413,6 +472,10 @@
         {
           "command": "infinityHarness.denyApproval",
           "when": "false"
+        },
+        {
+          "command": "infinityHarness.clearMessage",
+          "when": "false"
         }
       ],
       "comments/commentThread/context": [
@@ -435,7 +498,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "The daemon's API token, from `.meta-harness/api-token` in its checkout. Needed when the daemon is on another machine or started with `MH_REQUIRE_TOKEN=1`; not needed for a daemon on this machine."
+          "markdownDescription": "The daemon's API token, from `.infinity-harness/api-token` in its checkout. Needed when the daemon is on another machine or started with `IH_REQUIRE_TOKEN=1`; not needed for a daemon on this machine."
         },
         "infinityHarness.installPath": {
           "type": "string",
@@ -471,8 +534,8 @@
     }
   },
   "devDependencies": {
-    "@mh/client": "workspace:*",
-    "@mh/core": "workspace:*",
+    "@ih/client": "workspace:*",
+    "@ih/core": "workspace:*",
     "@types/node": "^24.19.2",
     "@types/vscode": "~1.100.0",
     "esbuild": "^0.28.2",

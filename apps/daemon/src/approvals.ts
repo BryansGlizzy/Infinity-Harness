@@ -1,7 +1,7 @@
-import { effectiveAgents, validateAgents, type AgentProfile, type Approval, type ApprovalKind, type BoardMcp, type BoardSkill, type Card } from '@mh/core';
+import { effectiveAgents, validateAgents, type AgentProfile, type Approval, type ApprovalKind, type BoardMcp, type BoardSkill, type Card } from '@ih/core';
 import { activeGrants } from './tools.ts';
-import type { Store } from '@mh/db';
-import { notificationJob, readNotification, type FastLane } from '@mh/fast-lane';
+import type { Store } from '@ih/db';
+import { notificationJob, readNotification, type FastLane } from '@ih/fast-lane';
 import type { Runner } from './runner.ts';
 
 // The approval queue (master plan Phase 6.4). Things an agent may not do on its own wait here for a human, who decides
@@ -20,6 +20,8 @@ export interface ApprovalDeps {
   fastLane?: FastLane | null;
   /** Without it, granted tools that aren't installed are only reported, never offered for install. */
   installer?: ToolInstaller | null;
+  /** Hears the decision on an agent's request to another swarm (Phase 7), to send it or withdraw it. */
+  federation?: { peerRequestDecided(a: Approval, approved: boolean): void } | null;
 }
 
 export interface ApprovalRequest {
@@ -43,6 +45,7 @@ const LABEL: Record<ApprovalKind, string> = {
   install_skill: 'proposes a skill',
   grant: 'asks for a tool grant',
   install_tool: 'asks to install a tool',
+  peer_request: 'asks another swarm for something',
 };
 
 export class Approvals {
@@ -52,6 +55,11 @@ export class Approvals {
   private asked = new Set<string>();
   constructor(deps: ApprovalDeps) {
     this.deps = deps;
+  }
+
+  /** The federation is created after the queue; it hears decisions on agents' requests to peers. */
+  setFederation(federation: ApprovalDeps['federation']) {
+    this.deps.federation = federation;
   }
 
   /**
@@ -168,6 +176,7 @@ export class Approvals {
     if (status === 'approved' && before.kind === 'escalation') this.tell(answered, this.approvedText(answered));
     if (status === 'approved') this.apply(before, by);
     const decided = store.decideApproval(id, status, by, note);
+    if (before.kind === 'peer_request') this.deps.federation?.peerRequestDecided(decided, status === 'approved');
     if (status === 'denied') this.tell(decided, `Denied${decided.note ? `: ${decided.note}` : '.'}`);
     else if (before.kind !== 'escalation') this.tell(decided, this.approvedText(decided));
     return decided;
@@ -188,6 +197,8 @@ export class Approvals {
         return `Approved: installing ${String(a.payload.grant)}. Your card starts when it finishes.${note}`;
       case 'escalation':
         return `A human answered your escalation${a.note ? `: ${a.note}` : '. Carry on.'}`;
+      case 'peer_request':
+        return `Approved: your request to the swarm "${String(a.payload.peerName ?? a.payload.peer)}" is being sent.${a.payload.blocking ? ' Your card is on hold until they answer: write a handoff and end your turn.' : ''}${note}`;
     }
   }
 
@@ -235,6 +246,8 @@ export class Approvals {
         );
         return;
       }
+      case 'peer_request':
+        return; // sent by the federation once this decision is recorded
       case 'escalation': {
         const card = a.cardId ? store.getCard(a.cardId) : undefined;
         if (!card || card.status !== 'blocked') return;

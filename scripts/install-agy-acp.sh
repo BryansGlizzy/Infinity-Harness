@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Installs Google's Antigravity ACP server (from the ACP registry) into .meta-harness/bin/agy-acp,
+# Installs Google's Antigravity ACP server (from the ACP registry) into .infinity-harness/bin/agy-acp,
 # verifying the registry's sha256. It reuses the agy CLI's Google login (auth method oauth-personal).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DEST=.meta-harness/bin/agy-acp
+# An install from before the rename keeps its data in .meta-harness; move it first so nothing is stranded.
+if [ -d .meta-harness ] && [ ! -e .infinity-harness ]; then mv .meta-harness .infinity-harness; fi
+DEST=.infinity-harness/bin/agy-acp
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) PLATFORM=darwin-aarch64 ;;
   Darwin-x86_64) PLATFORM=darwin-x86_64 ;;

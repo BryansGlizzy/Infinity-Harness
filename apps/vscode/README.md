@@ -40,8 +40,8 @@ For development, open `apps/vscode` in VS Code and press F5, or run `pnpm --filt
 
 | Setting | Default | |
 |---|---|---|
-| `infinityHarness.daemonUrl` | `http://127.0.0.1:7420` | Where the daemon serves its API and UI. Use another port for a second instance (`MH_PORT`). |
-| `infinityHarness.apiToken` | — | The daemon's API token (`.meta-harness/api-token`). Only needed for a daemon on another machine, or one started with `MH_REQUIRE_TOKEN=1`. The extension reconnects with `?since=` after a drop, so events that happened meanwhile (and their notifications) are not missed. |
+| `infinityHarness.daemonUrl` | `http://127.0.0.1:7420` | Where the daemon serves its API and UI. Use another port for a second instance (`IH_PORT`). |
+| `infinityHarness.apiToken` | — | The daemon's API token (`.infinity-harness/api-token`). Only needed for a daemon on another machine, or one started with `IH_REQUIRE_TOKEN=1`. The extension reconnects with `?since=` after a drop, so events that happened meanwhile (and their notifications) are not missed. |
 | `infinityHarness.installPath` | — | Your Infinity Harness checkout, for **Start Daemon**. |
 | `infinityHarness.notifications` | `attention` | `all` also announces landed cards; `off` keeps only the badge and status bar. |
 | `infinityHarness.editorContext` | `true` | Add the active file and selection to goals planned from the editor. |

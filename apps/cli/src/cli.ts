@@ -2,10 +2,12 @@ import { parseArgs } from 'node:util';
 import { COMMANDS, type Command, type Ctx } from './commands.ts';
 import { MACHINE } from './machine.ts';
 import { SKILL } from './skill.ts';
+import { PEER, PROJECT, REQUEST, SWARM } from './federation.ts';
+import { BOARD } from './board.ts';
 import { UsageError, type Io } from './io.ts';
-import { HttpError } from '@mh/client';
+import { HttpError } from '@ih/client';
 
-export const ALL: Command[] = [...COMMANDS, MACHINE, SKILL];
+export const ALL: Command[] = [...COMMANDS, MACHINE, BOARD, SWARM, PEER, PROJECT, REQUEST, SKILL];
 
 const GLOBAL = {
   json: { type: 'boolean' },

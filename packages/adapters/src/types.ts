@@ -1,4 +1,4 @@
-import type { HarnessEvent, ModelOption, ReasoningOptions } from '@mh/core';
+import type { HarnessEvent, ModelOption, ReasoningOptions } from '@ih/core';
 import type { Pty } from './pty.ts';
 
 /** MCP servers handed to the agent at session start (ACP `mcpServers`). */

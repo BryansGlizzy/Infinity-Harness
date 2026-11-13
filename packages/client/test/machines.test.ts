@@ -14,7 +14,7 @@ import { Fleet, MachineCatalog, MachineConnection, classifySshFailure, parseScop
 const profile = (over: Partial<MachineProfile> = {}): MachineProfile => ({ id: 'm_1', label: 'workbox', target: 'me@workbox', remotePort: 7420, enabled: true, ...over });
 
 test('the catalog: add, find, rename, disable, remove; private file; bad input refused', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mh-cat-'));
+  const dir = mkdtempSync(join(tmpdir(), 'ih-cat-'));
   const file = join(dir, 'sub', 'machines.json');
   const cat = new MachineCatalog(file);
   assert.deepEqual(cat.list(), [], 'no file yet');
@@ -198,7 +198,7 @@ test('a daemon that requires its token: the token is fetched over SSH and used; 
 test('the fleet: this machine first, saved machines after, scoped ids', async () => {
   const t = await setup();
   const ssh = fakeSsh(t.cfg.port);
-  const cat = new MachineCatalog(join(mkdtempSync(join(tmpdir(), 'mh-fleet-')), 'machines.json'));
+  const cat = new MachineCatalog(join(mkdtempSync(join(tmpdir(), 'ih-fleet-')), 'machines.json'));
   cat.add({ label: 'workbox', target: 'me@workbox' });
   cat.add({ label: 'parked', target: 'old' });
   cat.setEnabled('parked', false);

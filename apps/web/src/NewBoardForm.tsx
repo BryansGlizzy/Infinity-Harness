@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { Board } from '@mh/core';
+import type { Board } from '@ih/core';
 import { api, type FolderInfo, type RepoSetup } from './api.ts';
 
 const join = (dir: string, name: string) => `${dir.replace(/\/+$/, '')}/${name}`;
@@ -82,7 +82,7 @@ export function NewBoardForm({ onCreated, onCancel }: { onCreated: (b: Board) =>
     mode === 'direct' && target && !target.notDirectory && !target.git?.inside
       ? {
           text: target.exists
-            ? `Agents will work directly in this folder (${target.itemCount} item${target.itemCount === 1 ? '' : 's'}), like an IDE assistant: no git setup, branches, reviews or landing. Workers run one at a time by default.`
+            ? `Agents will work directly in this folder (${target.itemCount} item${target.itemCount === 1 ? '' : 's'}), like an IDE assistant: no git setup, branches, reviews or landing. Up to three workers run at once by default (Settings → Guardrails).`
             : 'This folder will be created, and agents will work directly in it: no git setup, branches, reviews or landing.',
           tone: 'ok' as const,
           setup: false,

@@ -354,3 +354,167 @@ test('stage 2: the window answers agents over the IDE bridge, lists approvals, f
     await close();
   }
 });
+
+test('stage 3: a swarm that knocks and a request from a peer appear in Needs you and are decided from the window', async () => {
+  await build({ absWorkingDir: dir, entryPoints: ['src/extension.ts'], bundle: true, platform: 'node', format: 'cjs', target: 'node20', external: ['vscode'], sourcemap: true, outfile: 'dist/extension.cjs', logLevel: 'silent' });
+  const { store, board, repo, cfg, federation, close } = await setup({ federation: true });
+  const fed = federation!;
+  const fake = fakeVscode({ folder: repo, daemonUrl: `http://127.0.0.1:${cfg.port}` });
+  const ext = loadExtension(fake.vscode);
+  try {
+    ext.activate(fake.extContext);
+    await until(() => fake.context.get('infinityHarness.state') === 'ready');
+    for (const id of ['infinityHarness.decidePeer', 'infinityHarness.decidePeerRequest', 'infinityHarness.openSwarms']) assert.ok(fake.commands.has(id), `${id} is registered`);
+    assert.ok(manifest.contributes.commands.some((c: any) => c.command === 'infinityHarness.decidePeer'), 'and declared');
+
+    // A stranger knocks. It shows up with its fingerprint, and nothing about it reaches an agent.
+    const { generateIdentity } = await import('../../daemon/src/federation/identity.ts');
+    const stranger = generateIdentity();
+    fed.handleHello({ swarmId: stranger.swarmId, publicKey: stranger.publicKey }, { name: 'Gamma', projects: [] });
+    const attention = fake.views.get('infinityHarness.attention')!;
+    await until(() => attention.provider.getChildren().some((a: any) => a.kind === 'peer'));
+    const knock = attention.provider.getChildren().find((a: any) => a.kind === 'peer');
+    const item = attention.provider.getTreeItem(knock);
+    assert.match(item.label, /Swarm "Gamma" wants to connect/);
+    assert.match(item.tooltip.value, new RegExp(stranger.fingerprint));
+    await until(() => ((attention.view.badge as { value: number } | undefined)?.value ?? 0) >= 1);
+
+    // Accepting asks for a confirmation that names the fingerprint; declining it changes nothing.
+    fake.hooks.pick = (items) => (items as any[]).find((i) => i.v === 'approve');
+    fake.hooks.warn = undefined;
+    await fake.commands.get('infinityHarness.decidePeer')!(knock.peer);
+    assert.equal(store.fed.getPeer(knock.peer.id)!.trust, 'pending', 'not accepted without the confirmation');
+    assert.ok(fake.shown.some((m) => m.includes(stranger.fingerprint)), 'the confirmation shows the fingerprint');
+    fake.hooks.warn = 'Accept';
+    await fake.commands.get('infinityHarness.decidePeer')!(knock.peer);
+    assert.equal(store.fed.getPeer(knock.peer.id)!.trust, 'verified');
+    await until(() => !attention.provider.getChildren().some((a: any) => a.kind === 'peer'));
+
+    // The accepted swarm files a request against a published project that takes them.
+    fed.saveDraft(board.id, { name: 'Demo', oneLine: 'Demo project', provides: ['demo'], accepts: { requests: true, note: '' } }, 'manual');
+    fed.publish(board.id, 'basic');
+    const peer = store.fed.getPeer(knock.peer.id)!;
+    fed.receiveRequest(peer, { id: 'req00001', title: 'Crash on empty input', description: 'parse("") throws', project: board.id, blocking: true, acceptance: [], milestones: [], budget: null, origin: { cardId: null, hops: [peer.swarmId!] } });
+    await until(() => attention.provider.getChildren().some((a: any) => a.kind === 'peerRequest'));
+    const req = attention.provider.getChildren().find((a: any) => a.kind === 'peerRequest');
+    assert.match(attention.provider.getTreeItem(req).label, /Request from Gamma: Crash on empty input/);
+    assert.equal(attention.provider.getTreeItem(req).description, 'they are waiting');
+
+    // Declining needs a reason, which the requester reads.
+    fake.hooks.pick = (items) => (items as any[]).find((i) => i.v === 'decline');
+    fake.hooks.input = () => 'not this quarter';
+    await fake.commands.get('infinityHarness.decidePeerRequest')!(req.request);
+    const after = store.fed.getRequest(req.request.id)!;
+    assert.equal(after.status, 'declined');
+    assert.equal(after.thread.at(-1)?.text, 'not this quarter');
+    await until(() => !attention.provider.getChildren().some((a: any) => a.kind === 'peerRequest'));
+
+    // A question from a swarm we asked, and a landed result to check: Needs-you items with their own command.
+    const asked = store.fed.createRequest({ direction: 'out', peerId: peer.id, remoteId: 'r_q', title: 'Which node version', description: 'x', status: 'pending', origin: { swarmId: 'me', cardId: null, hops: ['me'] }, boardId: board.id });
+    store.fed.updateRequest(asked.id, { status: 'needs_info', thread: [{ side: 'receiver', at: new Date().toISOString(), text: 'Which node version do you run?' }] });
+    await until(() => attention.provider.getChildren().some((a: any) => a.kind === 'peerReply'));
+    const reply = attention.provider.getChildren().find((a: any) => a.kind === 'peerReply');
+    const replyItem = attention.provider.getTreeItem(reply);
+    assert.match(replyItem.label, /Gamma asks about "Which node version"|asks about "Which node version"/);
+    assert.equal(replyItem.command.command, 'infinityHarness.decidePeerReply');
+    assert.ok(fake.commands.has('infinityHarness.decidePeerReply'));
+  } finally {
+    ext.deactivate();
+    for (const d of fake.extContext.subscriptions) d.dispose();
+    await close();
+  }
+});
+
+test('stage 4: Remove This Board offers forget or delete; delete asks twice and needs the name typed back', async () => {
+  await build({ absWorkingDir: dir, entryPoints: ['src/extension.ts'], bundle: true, platform: 'node', format: 'cjs', target: 'node20', external: ['vscode'], sourcemap: true, outfile: 'dist/extension.cjs', logLevel: 'silent' });
+  const { store, board, repo, cfg, close } = await setup();
+  const { existsSync } = await import('node:fs');
+  const fake = fakeVscode({ folder: repo, daemonUrl: `http://127.0.0.1:${cfg.port}` });
+  const ext = loadExtension(fake.vscode);
+  try {
+    ext.activate(fake.extContext);
+    await until(() => fake.context.get('infinityHarness.state') === 'ready');
+    assert.ok(manifest.contributes.commands.some((c: any) => c.command === 'infinityHarness.removeBoard'));
+    const remove = fake.commands.get('infinityHarness.removeBoard')!;
+
+    // Delete: the modal warning must be accepted, and then the name typed exactly.
+    fake.hooks.pick = (items) => (items as any[]).find((i) => i.v === 'delete');
+    fake.hooks.warn = undefined;
+    await remove();
+    assert.ok(store.getBoard(board.id), 'declining the warning deletes nothing');
+    fake.hooks.warn = 'Delete the folder';
+    fake.hooks.input = () => 'demo';
+    await remove();
+    assert.ok(store.getBoard(board.id) && existsSync(repo), 'a wrong name deletes nothing');
+
+    // Forget: no questions; the folder stays and the window finds itself without a board.
+    fake.hooks.pick = (items) => (items as any[]).find((i) => i.v === 'forget');
+    await remove();
+    assert.equal(store.getBoard(board.id), undefined);
+    assert.ok(existsSync(repo));
+    await until(() => fake.context.get('infinityHarness.state') === 'noBoard');
+  } finally {
+    ext.deactivate();
+    for (const d of fake.extContext.subscriptions) d.dispose();
+    await close();
+  }
+});
+
+test('stage 5: messages for you can be cleared and open what they name; pools can be tested and put back from the window', async () => {
+  await build({ absWorkingDir: dir, entryPoints: ['src/extension.ts'], bundle: true, platform: 'node', format: 'cjs', target: 'node20', external: ['vscode'], sourcemap: true, outfile: 'dist/extension.cjs', logLevel: 'silent' });
+  const { store, board, repo, cfg, health, close } = await setup();
+  const fake = fakeVscode({ folder: repo, daemonUrl: `http://127.0.0.1:${cfg.port}` });
+  const ext = loadExtension(fake.vscode);
+  try {
+    ext.activate(fake.extContext);
+    await until(() => fake.context.get('infinityHarness.state') === 'ready');
+    const attention = fake.views.get('infinityHarness.attention')!;
+    const messages = () => attention.provider.getChildren().filter((a: any) => a.kind === 'message');
+
+    const worker = store.createCard({ boardId: board.id, title: 'Chatty worker' });
+    const summaryCard = store.createCard({ boardId: board.id, title: 'Summary: a goal' });
+    store.postMessage({ boardId: board.id, fromActor: `card:${worker.id}`, toCard: null, body: 'a question for you', urgent: false });
+    store.postMessage({ boardId: board.id, fromActor: 'daemon:summary', toCard: null, body: `Final summary ready for "a goal": open card ${summaryCard.id} for the full report.\n\nIt went well.`, urgent: false });
+    store.postMessage({ boardId: board.id, fromActor: 'daemon:health', toCard: null, body: 'Fake A stopped answering', urgent: false });
+    await until(() => messages().length === 3);
+
+    // Each has a Clear button, and the ones that name a card open it.
+    const items = messages();
+    const forSummary = items.find((i: any) => i.message.fromActor === 'daemon:summary');
+    const tree = attention.provider.getTreeItem(forSummary);
+    assert.equal(tree.contextValue, 'message');
+    assert.deepEqual([tree.command.command, tree.command.arguments[0]], ['infinityHarness.openCard', summaryCard.id], 'the final summary opens its card');
+    assert.equal(attention.provider.getTreeItem(items.find((i: any) => i.message.fromActor === 'daemon:health')).command.command, 'infinityHarness.showText');
+
+    await fake.commands.get('infinityHarness.clearMessage')!(items.find((i: any) => i.message.fromActor === `card:${worker.id}`));
+    await until(() => messages().length === 2);
+    assert.equal(store.boardMessages(board.id).filter((m) => m.dismissedAt).length, 1);
+    await fake.commands.get('infinityHarness.clearMessages')!();
+    await until(() => messages().length === 0);
+    assert.equal(store.boardMessages(board.id).length, 3, 'nothing was deleted');
+
+    // Pools: one taken out of rotation shows why, is tested, and goes back on request.
+    health.eject('fa', 'no answer within 8 s');
+    let picks = 0;
+    fake.hooks.pick = (list) => {
+      picks++;
+      const arr = list as any[];
+      return arr[0]?.p ? arr.find((x) => x.p.id === 'fa') : arr.find((x) => x.v === 'test');
+    };
+    await fake.commands.get('infinityHarness.pools')!();
+    assert.equal(picks, 2, 'pick the pool, then what to do with it');
+    assert.ok(fake.shown.some((m) => /^Fake A: online/.test(m)));
+    assert.ok(health.ejection('fa'), 'a passing test does not put it back');
+    fake.hooks.pick = (list) => {
+      const arr = list as any[];
+      return arr[0]?.p ? arr.find((x) => x.p.id === 'fa') : arr.find((x) => x.v === 'restore');
+    };
+    await fake.commands.get('infinityHarness.pools')!();
+    assert.equal(health.ejection('fa'), null);
+    assert.ok(fake.shown.some((m) => m === 'Fake A is back in rotation.'));
+  } finally {
+    ext.deactivate();
+    for (const d of fake.extContext.subscriptions) d.dispose();
+    await close();
+  }
+});

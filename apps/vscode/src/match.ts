@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import type { Board } from '@mh/core';
+import type { Board } from '@ih/core';
 
 // Which board belongs to the open workspace. Kept free of the vscode API so it can be tested with node:test.
 

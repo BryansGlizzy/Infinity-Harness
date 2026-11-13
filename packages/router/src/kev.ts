@@ -1,4 +1,4 @@
-import { WORK_TYPES, type Classification, type WorkType } from '@mh/core';
+import { WORK_TYPES, type Classification, type WorkType } from '@ih/core';
 
 type Json = any;
 

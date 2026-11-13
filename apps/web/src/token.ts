@@ -1,8 +1,8 @@
-// The daemon's API token, for a daemon that asks for one (on another machine, or started with MH_REQUIRE_TOKEN=1).
+// The daemon's API token, for a daemon that asks for one (on another machine, or started with IH_REQUIRE_TOKEN=1).
 // A daemon on this machine needs none. It arrives in the address (`#token=...`, which VS Code adds when it opens the
 // board), is kept in this browser's storage, and is taken out of the address bar. If the daemon refuses a request
 // for lack of one, the page asks once.
-const KEY = 'mh.token';
+const KEY = 'ih.token';
 
 export function getToken(): string {
   try {
@@ -23,7 +23,7 @@ let asking: Promise<boolean> | null = null;
 export function askForToken(reason: string): Promise<boolean> {
   asking ??= Promise.resolve().then(() => {
     try {
-      const entered = window.prompt(`This daemon asks for its API token (${reason}). It is in .meta-harness/api-token in the Infinity Harness folder on the machine it runs on.`);
+      const entered = window.prompt(`This daemon asks for its API token (${reason}). It is in .infinity-harness/api-token in the Infinity Harness folder on the machine it runs on.`);
       if (!entered?.trim() || entered.trim() === getToken()) return false;
       localStorage.setItem(KEY, entered.trim());
       return true;

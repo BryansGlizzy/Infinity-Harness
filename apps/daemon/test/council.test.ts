@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Council, HarnessEvent } from '@mh/core';
-import type { Store } from '@mh/db';
-import { KevClient } from '@mh/router';
+import type { Council, HarnessEvent } from '@ih/core';
+import type { Store } from '@ih/db';
+import { KevClient } from '@ih/router';
 import { readProposal, renderProposal } from '../src/council.ts';
 import { setup } from './harness.ts';
 

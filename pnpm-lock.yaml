@@ -175,13 +175,13 @@ importers:
 
   apps/cli:
     dependencies:
-      '@mh/client':
+      '@ih/client':
         specifier: workspace:*
         version: link:../../packages/client
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@mh/tui':
+      '@ih/tui':
         specifier: workspace:*
         version: link:../tui
 
@@ -193,25 +193,28 @@ importers:
       '@fastify/websocket':
         specifier: ^11.3.6
         version: 11.3.6
-      '@mh/adapters':
+      '@ih/adapters':
         specifier: workspace:*
         version: link:../../packages/adapters
-      '@mh/context':
+      '@ih/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@ih/context':
         specifier: workspace:*
         version: link:../../packages/context
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@mh/db':
+      '@ih/db':
         specifier: workspace:*
         version: link:../../packages/db
-      '@mh/fast-lane':
+      '@ih/fast-lane':
         specifier: workspace:*
         version: link:../../packages/fast-lane
-      '@mh/gateway':
+      '@ih/gateway':
         specifier: workspace:*
         version: link:../../packages/gateway
-      '@mh/router':
+      '@ih/router':
         specifier: workspace:*
         version: link:../../packages/router
       '@modelcontextprotocol/sdk':
@@ -226,19 +229,19 @@ importers:
 
   apps/tui:
     dependencies:
-      '@mh/client':
+      '@ih/client':
         specifier: workspace:*
         version: link:../../packages/client
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../../packages/core
 
   apps/vscode:
     devDependencies:
-      '@mh/client':
+      '@ih/client':
         specifier: workspace:*
         version: link:../../packages/client
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../../packages/core
       '@types/node':
@@ -256,10 +259,10 @@ importers:
 
   apps/web:
     dependencies:
-      '@mh/client':
+      '@ih/client':
         specifier: workspace:*
         version: link:../../packages/client
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../../packages/core
       '@xterm/addon-fit':
@@ -296,7 +299,7 @@ importers:
 
   packages/adapters:
     dependencies:
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../core
       node-pty:
@@ -305,19 +308,19 @@ importers:
 
   packages/client:
     dependencies:
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../core
 
   packages/context:
     dependencies:
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../core
-      '@mh/db':
+      '@ih/db':
         specifier: workspace:*
         version: link:../db
-      '@mh/fast-lane':
+      '@ih/fast-lane':
         specifier: workspace:*
         version: link:../fast-lane
 
@@ -325,7 +328,7 @@ importers:
 
   packages/db:
     dependencies:
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../core
 
@@ -335,7 +338,7 @@ importers:
 
   packages/router:
     dependencies:
-      '@mh/core':
+      '@ih/core':
         specifier: workspace:*
         version: link:../core
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { AgentProfile, Approval, ApprovalKind, BoardMcp, BoardSkill, Card } from '@mh/core';
+import type { AgentProfile, Approval, ApprovalKind, BoardMcp, BoardSkill, Card } from '@ih/core';
 import { api } from './api.ts';
 
 const KIND: Record<ApprovalKind, string> = {
@@ -9,6 +9,7 @@ const KIND: Record<ApprovalKind, string> = {
   install_skill: 'Skill',
   grant: 'Tool grant',
   install_tool: 'Install a tool',
+  peer_request: 'Request to another swarm',
 };
 
 /** What approving would apply, spelled out so a human can judge it. */
@@ -42,6 +43,20 @@ function Detail({ a }: { a: Approval }) {
       return <p className="small">Runs the install command from Settings → Tools for <strong>{String(a.payload.grant)}</strong> on this machine, with your permissions. The card starts once it finishes.</p>;
     case 'escalation':
       return <p className="small">Your answer goes to the agent and the card runs again.</p>;
+    case 'peer_request': {
+      const p = a.payload as { peerName?: string; projectName?: string; title: string; description: string; blocking?: boolean; acceptance?: string[]; budget?: { maxUsd?: number; maxTokens?: number } | null };
+      return (
+        <div className="small">
+          <p>Sends this to the swarm <strong>{p.peerName}</strong>{p.projectName ? <> (project {p.projectName})</> : null}. Their operator decides whether to take it.{p.blocking ? ' The card is on hold until they answer.' : ''}{p.budget ? ` It names a budget: ${[p.budget.maxUsd !== undefined ? `$${p.budget.maxUsd}` : '', p.budget.maxTokens !== undefined ? `${p.budget.maxTokens} tokens` : ''].filter(Boolean).join(' + ')}.` : ''}</p>
+          <details open>
+            <summary><strong>{p.title}</strong> (written by the agent)</summary>
+            <p style={{ whiteSpace: 'pre-wrap' }}>{p.description}</p>
+            {p.acceptance && p.acceptance.length > 0 && <ul>{p.acceptance.map((x, i) => <li key={i}>{x}</li>)}</ul>}
+          </details>
+          <p className="muted">It leaves this machine and reaches the other swarm's agents' prompts once their operator approves. Check it holds nothing private.</p>
+        </div>
+      );
+    }
   }
 }
 
@@ -64,6 +79,9 @@ export function ApprovalsPanel(props: { approvals: Approval[]; cards: Card[]; on
 
   return (
     <div className="inbox approvals" role="dialog" aria-label="Approvals">
+      <div className="inbox-head">
+        <strong>Approvals ({props.approvals.length})</strong>
+      </div>
       {props.approvals.length === 0 && <p className="muted">Nothing is waiting for you.</p>}
       {props.approvals.map((a) => (
         <div key={a.id} className="inbox-item approval">

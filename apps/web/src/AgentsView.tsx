@@ -1,6 +1,6 @@
-import { useEffect, useState, type ReactNode } from 'react';
-import { CARD_ROLES, delegationTargets, effectiveAgents, type AgentProfile, type CardRole, type Settings } from '@mh/core';
-import { api, type ActiveSession, type AgentPrior, type ModelCatalog, type PoolWithStatus } from './api.ts';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { CARD_ROLES, delegationTargets, effectiveAgents, type AgentProfile, type CardRole, type Settings } from '@ih/core';
+import { api, type ActiveSession, type AgentPrior, type ModelCatalog, type PoolWithStatus, type SystemHarnessId, type SystemHarnessStatus } from './api.ts';
 import { HARNESS_LABEL, ROLE_LABEL, shortModel } from './agentInfo.ts';
 
 /** A model picker for one pool: the models its harness offers, plus "pool default" and any saved value not listed. */
@@ -87,6 +87,424 @@ function PoolState({ pool, sessions }: { pool?: PoolWithStatus; sessions: Active
   );
 }
 
+/**
+ * Is this pool's model answering? Shows the last check (endpoint pools are checked every minute, harnesses on request),
+ * a Test button to check now, and, for a pool taken out of rotation after its endpoint stopped answering, the reason and
+ * the button that puts it back (it stays out until you do).
+ */
+function PoolHealthLine({ pool, onChanged, onError }: { pool?: PoolWithStatus; onChanged: () => void; onError: (m: string) => void }) {
+  const [busy, setBusy] = useState<'test' | 'restore' | null>(null);
+  if (!pool) return null;
+  const h = pool.health;
+  async function run(kind: 'test' | 'restore') {
+    setBusy(kind);
+    try {
+      await (kind === 'test' ? api.testPool(pool!.id) : api.restorePool(pool!.id));
+      onChanged();
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+  const at = h?.checkedAt ? new Date(h.checkedAt).toLocaleTimeString() : null;
+  const what = h?.checked === 'harness' ? 'harness ready' : 'online';
+  const label = h?.ejected ? 'out of rotation' : h?.reachable === 'online' ? `${what}${h.latencyMs !== null ? ` · ${h.latencyMs} ms` : ''}` : h?.reachable === 'offline' ? 'no response' : 'not checked';
+  const tone = h?.ejected || h?.reachable === 'offline' ? 'bad' : h?.reachable === 'online' ? 'ok' : 'idle';
+  return (
+    <div className="pool-health">
+      <span className={`health-chip ${tone}`} title={[h?.detail, at ? `checked ${at}` : 'not checked yet'].filter(Boolean).join(' · ')}>
+        <span className="dot" />
+        {label}
+      </span>
+      <button className="ghost small" disabled={busy !== null} onClick={() => void run('test')} title={h?.checked === 'harness' ? 'Starts the harness and asks what it offers' : 'Asks the model endpoint now'}>
+        {busy === 'test' ? 'Testing…' : 'Test'}
+      </button>
+      {h?.ejected && (
+        <>
+          <button className="small" disabled={busy !== null} onClick={() => void run('restore')} title="It stays out of routing until you do this">
+            Put back in rotation
+          </button>
+          <span className="muted small ejected-why">
+            Out since {new Date(h.ejected.since).toLocaleTimeString()}: {h.ejected.reason}. Not held against the model.
+          </span>
+        </>
+      )}
+      {!h?.ejected && h?.reachable === 'offline' && <span className="muted small ejected-why">{h.detail}</span>}
+    </div>
+  );
+}
+
+/**
+ * Discovers, links, installs, and authenticates the agent harnesses on this machine (Claude Code, Codex, Kimi,
+ * Antigravity, OpenCode for NIM & Local LLM, and GitHub CLI for PR landing).
+ */
+function SystemHarnessesPanel(props: {
+  pools: PoolWithStatus[];
+  onPoolsChanged?: () => void;
+  onRefreshModels: () => void;
+  onError: (m: string) => void;
+}) {
+  const [harnesses, setHarnesses] = useState<SystemHarnessStatus[] | null>(null);
+  const [busyId, setBusyId] = useState<SystemHarnessId | null>(null);
+  const [busyAction, setBusyAction] = useState<'install' | 'login' | 'env' | 'scan' | null>(null);
+  const [installLog, setInstallLog] = useState<{ id: SystemHarnessId; ok: boolean; output: string } | null>(null);
+  const [apiKeyOpen, setApiKeyOpen] = useState<SystemHarnessId | null>(null);
+  const [apiKeyValue, setApiKeyValue] = useState('');
+  const [envOpen, setEnvOpen] = useState(false);
+  const [nimKey, setNimKey] = useState('');
+  const [nimModel, setNimModel] = useState('deepseek-ai/deepseek-v3.2');
+  const [localUrl, setLocalUrl] = useState('');
+  const [localModel, setLocalModel] = useState('');
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const loadHarnesses = useCallback(async (notifyPools = false) => {
+    try {
+      const list = await api.harnesses();
+      setHarnesses(list);
+      const oc = list.find((h) => h.id === 'opencode')?.envConfig;
+      if (oc) {
+        setNimModel((prev) => prev || oc.nimModel || 'deepseek-ai/deepseek-v3.2');
+        setLocalUrl((prev) => prev || oc.localBaseUrl || '');
+        setLocalModel((prev) => prev || oc.localModel || '');
+      }
+      if (notifyPools) {
+        props.onPoolsChanged?.();
+      }
+    } catch {
+      // daemon may not support /api/harnesses in older mocks
+    }
+  }, [props]);
+
+  useEffect(() => {
+    void loadHarnesses(false);
+  }, [loadHarnesses]);
+
+  // Poll while any sign-in flow is active so OAuth/device completion updates automatically.
+  const anyActiveFlow = harnesses?.some((h) => h.loginFlow?.active) ?? false;
+  useEffect(() => {
+    if (!anyActiveFlow) return;
+    const t = setInterval(() => {
+      void api.harnesses().then((list) => {
+        setHarnesses((prev) => {
+          const wasActive = prev?.some((h) => h.loginFlow?.active) ?? false;
+          const nowActive = list.some((h) => h.loginFlow?.active);
+          if (wasActive && !nowActive) {
+            props.onPoolsChanged?.();
+            props.onRefreshModels();
+          }
+          return list;
+        });
+      }, () => {});
+    }, 1800);
+    return () => clearInterval(t);
+  }, [anyActiveFlow, props]);
+
+  if (!harnesses) return null;
+
+  const copyText = (key: string, text: string) => {
+    void navigator.clipboard?.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((c) => (c === key ? null : c)), 1600);
+  };
+
+  async function handleInstall(id: SystemHarnessId) {
+    setBusyId(id);
+    setBusyAction('install');
+    setInstallLog(null);
+    try {
+      const r = await api.installHarness(id);
+      setInstallLog({ id, ok: r.ok, output: r.output });
+      if (!r.ok) props.onError(`Install failed for ${id}: ${r.output.trim().split('\n').slice(-2).join(' ')}`);
+      await loadHarnesses(true);
+      props.onRefreshModels();
+    } catch (err) {
+      props.onError((err as Error).message);
+    } finally {
+      setBusyId(null);
+      setBusyAction(null);
+    }
+  }
+
+  async function handleLogin(id: SystemHarnessId, opts: { apiKey?: string; mode?: string } = {}) {
+    setBusyId(id);
+    setBusyAction('login');
+    try {
+      const r = await api.loginHarness(id, opts);
+      setHarnesses((prev) => (prev ? prev.map((h) => (h.id === id ? r.harness : h)) : [r.harness]));
+      if (opts.apiKey) {
+        setApiKeyOpen(null);
+        setApiKeyValue('');
+      }
+      props.onPoolsChanged?.();
+      props.onRefreshModels();
+    } catch (err) {
+      props.onError((err as Error).message);
+    } finally {
+      setBusyId(null);
+      setBusyAction(null);
+    }
+  }
+
+  async function handleCancelLogin(id: SystemHarnessId) {
+    try {
+      const r = await api.cancelHarnessLogin(id);
+      setHarnesses((prev) => (prev ? prev.map((h) => (h.id === id ? r.harness : h)) : [r.harness]));
+    } catch (err) {
+      props.onError((err as Error).message);
+    }
+  }
+
+  async function handleSaveEnv() {
+    setBusyId('opencode');
+    setBusyAction('env');
+    try {
+      await api.configureHarnessEnv({
+        ...(nimKey.trim() ? { nimApiKey: nimKey.trim() } : {}),
+        nimModel: nimModel.trim() || 'deepseek-ai/deepseek-v3.2',
+        localBaseUrl: localUrl.trim(),
+        localModel: localModel.trim(),
+      });
+      setNimKey('');
+      setEnvOpen(false);
+      await loadHarnesses(true);
+      props.onRefreshModels();
+    } catch (err) {
+      props.onError((err as Error).message);
+    } finally {
+      setBusyId(null);
+      setBusyAction(null);
+    }
+  }
+
+  const readyCount = harnesses.filter((h) => h.installed && (h.auth.status === 'signed_in' || h.auth.status === 'configured')).length;
+
+  return (
+    <section className="agent-group harness-system-section">
+      <div className="row harness-system-head">
+        <div>
+          <h3>System Harnesses &amp; Logins</h3>
+          <p className="muted small">
+            Agents detected on this machine ({readyCount} of {harnesses.length} ready). Install missing CLIs or ACP bridges and sign in directly — newly linked pools appear immediately without restarting the daemon.
+          </p>
+        </div>
+        <span className="spacer" />
+        <button
+          className="ghost small-btn"
+          disabled={busyAction === 'scan'}
+          onClick={async () => {
+            setBusyAction('scan');
+            await loadHarnesses(true);
+            setBusyAction(null);
+          }}
+          title="Re-scan system PATH, credentials, and .env pools"
+        >
+          {busyAction === 'scan' ? 'Scanning…' : 'Re-scan system'}
+        </button>
+      </div>
+
+      <div className="harness-status-grid">
+        {harnesses.map((h) => {
+          const isReady = h.installed && (h.auth.status === 'signed_in' || h.auth.status === 'configured');
+          const isBusy = busyId === h.id;
+          const activePools = props.pools.filter((p) => h.poolIds.includes(p.id));
+          return (
+            <div key={h.id} className={`harness-sys-card surface-box ${isReady ? 'ready' : h.installed ? 'needs-auth' : 'missing'}`}>
+              <div className="row nowrap harness-sys-card-head">
+                <strong>{h.label}</strong>
+                <span className="spacer" />
+                <span className={`badge ${h.installed ? 'approve' : h.missingParts.length === 1 && h.id === 'codex' ? 'pending' : ''}`}>
+                  {h.installed ? 'Installed' : h.missingParts.includes('codex-acp') && !h.missingParts.includes('codex') ? 'Missing bridge' : 'Not installed'}
+                </span>
+                <span className={`badge ${h.auth.status === 'signed_in' || h.auth.status === 'configured' ? 'approve' : 'pending'}`}>
+                  {h.auth.status === 'signed_in'
+                    ? 'Signed in'
+                    : h.auth.status === 'configured'
+                      ? 'Configured'
+                      : h.auth.status === 'unconfigured'
+                        ? 'Not configured'
+                        : 'Needs sign-in'}
+                </span>
+              </div>
+
+              <p className="muted small harness-sys-desc">{h.description}</p>
+
+              <div className="harness-sys-meta small">
+                <div>
+                  <span className="muted">Account / Auth: </span>
+                  <strong>{h.auth.account ? `${h.auth.account} (${h.auth.detail})` : h.auth.detail ?? '—'}</strong>
+                </div>
+                <div className="ellipsis" title={h.binaryPath ?? h.installCommand}>
+                  <span className="muted">{h.binaryPath ? 'Binary: ' : 'Install cmd: '}</span>
+                  <code>{h.binaryPath ?? h.installCommand}</code>
+                  {h.version && <span className="muted"> · {h.version}</span>}
+                </div>
+                {activePools.length > 0 && (
+                  <div className="row" style={{ gap: 6, marginTop: 2 }}>
+                    <span className="muted">Linked pool{activePools.length > 1 ? 's' : ''}:</span>
+                    {activePools.map((p) => (
+                      <span key={p.id} className={`chip pool ${p.status.state}`}>
+                        <span className="dot" />
+                        {p.label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {h.loginFlow && (h.loginFlow.active || h.loginFlow.url || h.loginFlow.error) && (
+                <div className="harness-login-box">
+                  <div className="row">
+                    <strong>{h.loginFlow.active ? 'Complete sign-in in your browser' : h.loginFlow.error ? 'Sign-in status' : 'Sign-in link ready'}</strong>
+                    <span className="spacer" />
+                    {h.loginFlow.active && (
+                      <button className="ghost small-btn" onClick={() => void handleCancelLogin(h.id)}>
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                  {h.loginFlow.code && (
+                    <div className="row harness-device-code">
+                      <span className="muted small">One-time code:</span>
+                      <code>{h.loginFlow.code}</code>
+                      <button className="ghost small-btn" onClick={() => copyText(`code-${h.id}`, h.loginFlow!.code!)}>
+                        {copiedKey === `code-${h.id}` ? 'Copied!' : 'Copy code'}
+                      </button>
+                    </div>
+                  )}
+                  {h.loginFlow.url && (
+                    <div className="row">
+                      <a className="btn-link" href={h.loginFlow.url} target="_blank" rel="noreferrer">
+                        Open Sign-In Page ↗
+                      </a>
+                      <button className="ghost small-btn" onClick={() => copyText(`url-${h.id}`, h.loginFlow!.url!)}>
+                        {copiedKey === `url-${h.id}` ? 'Copied!' : 'Copy link'}
+                      </button>
+                    </div>
+                  )}
+                  {h.loginFlow.error && <p className="small error">{h.loginFlow.error}</p>}
+                  {h.loginFlow.active && <p className="muted small">Waiting for authentication to finish… This card will update automatically.</p>}
+                </div>
+              )}
+
+              {installLog?.id === h.id && (
+                <div className="harness-login-box">
+                  <div className="row">
+                    <strong>{installLog.ok ? 'Install finished' : 'Install output'}</strong>
+                    <span className="spacer" />
+                    <button className="ghost small-btn" onClick={() => setInstallLog(null)}>Dismiss</button>
+                  </div>
+                  {installLog.output && <pre className="small">{installLog.output.slice(-600)}</pre>}
+                </div>
+              )}
+
+              {apiKeyOpen === h.id && (
+                <div className="harness-login-box">
+                  <label className="small">
+                    {h.id === 'gh' ? 'Paste GitHub Personal Access Token:' : 'Paste OpenAI API Key:'}
+                    <div className="row" style={{ marginTop: 4 }}>
+                      <input
+                        type="password"
+                        value={apiKeyValue}
+                        onChange={(e) => setApiKeyValue(e.target.value)}
+                        placeholder={h.id === 'gh' ? 'ghp_...' : 'sk-...'}
+                        aria-label={`${h.label} API key`}
+                      />
+                      <button className="small-btn" disabled={!apiKeyValue.trim() || isBusy} onClick={() => void handleLogin(h.id, { apiKey: apiKeyValue })}>
+                        {isBusy ? 'Saving…' : 'Save'}
+                      </button>
+                      <button className="ghost small-btn" onClick={() => { setApiKeyOpen(null); setApiKeyValue(''); }}>
+                        Cancel
+                      </button>
+                    </div>
+                  </label>
+                </div>
+              )}
+
+              {h.id === 'opencode' && envOpen && (
+                <div className="harness-login-box">
+                  <div className="agent-fields">
+                    <label>
+                      NVIDIA NIM API Key
+                      <input
+                        type="password"
+                        value={nimKey}
+                        onChange={(e) => setNimKey(e.target.value)}
+                        placeholder={h.envConfig?.nimApiKeySet ? '•••••••• (already set in .env)' : 'nvapi-...'}
+                      />
+                    </label>
+                    <label>
+                      NVIDIA Model
+                      <input value={nimModel} onChange={(e) => setNimModel(e.target.value)} placeholder="deepseek-ai/deepseek-v3.2" />
+                    </label>
+                    <label>
+                      Local LLM Base URL
+                      <input value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder="http://127.0.0.1:8000/v1" />
+                    </label>
+                    <label>
+                      Local LLM Model
+                      <input value={localModel} onChange={(e) => setLocalModel(e.target.value)} placeholder="qwen3-coder" />
+                    </label>
+                  </div>
+                  <div className="row" style={{ marginTop: 6 }}>
+                    <button className="small-btn" disabled={isBusy} onClick={() => void handleSaveEnv()}>
+                      {isBusy && busyAction === 'env' ? 'Saving…' : 'Save to .env & Link Pools'}
+                    </button>
+                    <button className="ghost small-btn" onClick={() => setEnvOpen(false)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              <div className="row harness-sys-actions">
+                {!h.installed ? (
+                  <>
+                    <button className="small-btn" disabled={isBusy} onClick={() => void handleInstall(h.id)} title={`Runs: ${h.installCommand}`}>
+                      {isBusy && busyAction === 'install'
+                        ? 'Installing…'
+                        : h.missingParts.includes('codex-acp') && !h.missingParts.includes('codex')
+                          ? 'Install ACP Bridge'
+                          : `Install ${h.label}`}
+                    </button>
+                    <button className="ghost small-btn" onClick={() => copyText(`cmd-${h.id}`, h.installCommand)} title={h.installCommand}>
+                      {copiedKey === `cmd-${h.id}` ? 'Copied!' : 'Copy install cmd'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {h.loginCommand && (
+                      <button
+                        className={h.auth.status === 'signed_in' ? 'ghost small-btn' : 'small-btn'}
+                        disabled={isBusy}
+                        onClick={() => void handleLogin(h.id)}
+                        title={`Runs: ${h.loginCommand}`}
+                      >
+                        {isBusy && busyAction === 'login' ? 'Starting sign-in…' : h.auth.status === 'signed_in' ? 'Re-authenticate' : 'Sign in'}
+                      </button>
+                    )}
+                    {h.supportsApiKeyLogin && (
+                      <button
+                        className="ghost small-btn"
+                        onClick={() => setApiKeyOpen(apiKeyOpen === h.id ? null : h.id)}
+                      >
+                        {h.id === 'gh' ? 'Use token' : 'Use API key'}
+                      </button>
+                    )}
+                    {h.id === 'opencode' && (
+                      <button className={h.auth.status === 'configured' ? 'ghost small-btn' : 'small-btn'} onClick={() => setEnvOpen(!envOpen)}>
+                        {envOpen ? 'Hide settings' : 'Configure NIM / Local LLM'}
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export function AgentsView(props: {
   boardId: string;
   settings: Settings | null;
@@ -95,6 +513,8 @@ export function AgentsView(props: {
   models: ModelCatalog;
   onSettings: (s: Settings) => void;
   onRefreshModels: () => void;
+  /** Reloads the pools (their health changed). */
+  onPoolsChanged?: () => void;
   onError: (m: string) => void;
   /** Just created the board: say what to set up first. */
   intro?: boolean;
@@ -121,7 +541,12 @@ export function AgentsView(props: {
   }
 
   const agents = effectiveAgents(settings, pools);
-  const commit = (next: AgentProfile[]) => save({ agents: next.map(({ implicit: _, ...a }) => a) });
+  const commit = (next: AgentProfile[], more: Partial<Settings> = {}) => save({ agents: next.map(({ implicit: _, ...a }) => a), ...more });
+  const weights = settings.agentWeights ?? {};
+  const setWeight = (id: string, v: number) => {
+    const { [id]: _, ...rest } = weights;
+    void save({ agentWeights: v === 1 ? rest : { ...rest, [id]: Math.min(10, Math.max(0, v)) } });
+  };
   const update = (i: number, patch: Partial<AgentProfile>) => {
     const before = agents[i]!;
     let next = agents.map((a, j) => (j === i ? { ...a, ...patch } : a));
@@ -129,7 +554,9 @@ export function AgentsView(props: {
     if (patch.role === 'worker') next[i] = { ...next[i]!, delegatesTo: [] };
     if (patch.role === 'orchestrator') next = next.map((a) => ({ ...a, delegatesTo: a.delegatesTo.filter((t) => t !== before.id) }));
     if (patch.poolId !== undefined && patch.poolId !== before.poolId) next[i] = { ...next[i]!, model: '', reasoning: '' };
-    void commit(next);
+    // The weight belongs to the agent, so it follows a rename.
+    const renamed = patch.id !== undefined && patch.id !== before.id && weights[before.id] !== undefined;
+    void commit(next, renamed ? { agentWeights: Object.fromEntries(Object.entries(weights).map(([k, v]) => [k === before.id ? patch.id! : k, v])) } : {});
   };
   const remove = (i: number) => {
     const gone = agents[i]!.id;
@@ -177,6 +604,13 @@ export function AgentsView(props: {
         </div>
       </div>
 
+      <SystemHarnessesPanel
+        pools={pools}
+        onPoolsChanged={props.onPoolsChanged}
+        onRefreshModels={props.onRefreshModels}
+        onError={props.onError}
+      />
+
       <div className="agent-columns">
       {CARD_ROLES.map((role) => {
         const group = agents.map((a, i) => ({ a, i })).filter(({ a }) => a.role === role);
@@ -190,17 +624,18 @@ export function AgentsView(props: {
                 const targets = agents.filter((t) => t.id !== a.id && t.role !== 'orchestrator');
                 return (
                   <div key={`${a.id}-${i}`} className={`agent-card ${a.role} ${a.enabled ? '' : 'disabled'}`}>
-                    <div className="row nowrap">
+                    <div className="row nowrap agent-card-head">
                       <span className={`role-tag ${a.role}`}>{ROLE_LABEL[a.role]}</span>
                       <input
                         className="agent-id"
                         defaultValue={a.id}
                         key={a.id}
                         aria-label="Agent name"
+                        title="Click to rename this agent"
                         onBlur={(e) => e.target.value.trim() && e.target.value.trim() !== a.id && update(i, { id: e.target.value.trim() })}
                         onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
                       />
-                      {a.implicit && <span className="muted small" title="Added because this pool has no worker or lead of its own; editing saves it">default</span>}
+                      {a.implicit && <span className="badge default-badge" title="Added because this pool has no worker or lead of its own; editing saves it">default</span>}
                       <label className="switch" title={a.enabled ? 'Enabled' : 'Disabled'}>
                         <input type="checkbox" checked={a.enabled} onChange={(e) => update(i, { enabled: e.target.checked })} aria-label={`${a.id} enabled`} />
                         <span />
@@ -230,9 +665,27 @@ export function AgentsView(props: {
                         <ReasoningSelect pool={pool} models={models} value={a.reasoning ?? ''} onChange={(reasoning) => update(i, { reasoning })} />
                       </label>
                     </div>
-                    <div className="row">
-                      <PoolState pool={pool} sessions={props.sessions} />
-                      <Strengths prior={priors.find((p) => p.agentId === a.id)} />
+                    <div className="agent-status-bar">
+                      <div className="row">
+                        <PoolState pool={pool} sessions={props.sessions} />
+                        <Strengths prior={priors.find((p) => p.agentId === a.id)} />
+                        {a.role !== 'orchestrator' && (
+                          <label className="weight-field" title="Your thumb on the scale for automatic routing. 1 is neutral; above 1 favours this agent for cards it handles well, below 1 holds it back, 0 keeps cards off it. Open a card to see how each agent scored.">
+                            <span>Weight</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={10}
+                              step={0.1}
+                              value={weights[a.id] ?? 1}
+                              className={weights[a.id] !== undefined ? 'overridden' : ''}
+                              aria-label={`${a.id} routing weight`}
+                              onChange={(e) => e.target.value !== '' && setWeight(a.id, Number(e.target.value))}
+                            />
+                          </label>
+                        )}
+                      </div>
+                      <PoolHealthLine pool={pool} onChanged={props.onPoolsChanged ?? (() => {})} onError={props.onError} />
                     </div>
                     {a.role !== 'worker' && (
                       <div className="delegates">
@@ -272,12 +725,12 @@ export function AgentsView(props: {
         <h3>Permissions</h3>
         <p className="muted small">What each role may do with the board's tools. Workers can't create cards by default. Requests to spawn agents, add MCP servers or skills, and tool grants that need approval wait for you in Approvals.</p>
         <table className="pools-table surface-box">
-          <thead><tr><th>Role</th><th>Create cards</th><th>Add dependencies</th><th title="spawn_agent: add an agent to the board">Spawn agents</th><th title="propose_mcp and propose_skill: always wait for you">Propose MCP / skills</th><th title="request_grant, and grants on cards it creates">Request tool grants</th></tr></thead>
+          <thead><tr><th>Role</th><th>Create cards</th><th>Add dependencies</th><th title="spawn_agent: add an agent to the board">Spawn agents</th><th title="propose_mcp and propose_skill: always wait for you">Propose MCP / skills</th><th title="request_grant, and grants on cards it creates">Request tool grants</th><th title="request_peer: ask another swarm for a fix or a piece of work (waits for you by default, see Settings → Tools)">Ask other swarms</th></tr></thead>
           <tbody>
             {CARD_ROLES.map((role) => (
               <tr key={role}>
                 <td><span className={`role-tag ${role}`}>{ROLE_LABEL[role]}</span></td>
-                {(['canCreateCards', 'canAddDependencies', 'canSpawnAgents', 'canInstallMcp', 'canRequestGrants'] as const).map((key) => (
+                {(['canCreateCards', 'canAddDependencies', 'canSpawnAgents', 'canInstallMcp', 'canRequestGrants', 'canRequestPeers'] as const).map((key) => (
                   <td key={key}>
                     <input
                       type="checkbox"

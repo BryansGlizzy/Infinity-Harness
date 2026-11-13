@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { DaemonEvent } from '@mh/core';
+import type { DaemonEvent } from '@ih/core';
 import { Store } from '../src/index.ts';
 
 test('boards, cards and sessions round-trip and every mutation is logged', () => {
@@ -15,9 +15,9 @@ test('boards, cards and sessions round-trip and every mutation is logged', () =>
   const card = store.createCard({ boardId: board.id, title: 'Add login', description: 'JWT' });
   assert.equal(card.status, 'backlog');
 
-  const moved = store.updateCard(card.id, { status: 'ready', branch: 'mh/add-login' });
+  const moved = store.updateCard(card.id, { status: 'ready', branch: 'ih/add-login' });
   assert.equal(moved.status, 'ready');
-  assert.equal(moved.branch, 'mh/add-login');
+  assert.equal(moved.branch, 'ih/add-login');
   assert.equal(moved.title, 'Add login');
 
   const session = store.createSession({ cardId: card.id, poolId: 'nim', harness: 'opencode', model: 'nvidia/x' });
@@ -101,11 +101,25 @@ test('settings saved before agent profiles: the old orchestrator pool and model 
 });
 
 test('migrations are applied once and data survives reopening', () => {
-  const file = join(mkdtempSync(join(tmpdir(), 'mh-db-')), 'test.db');
+  const file = join(mkdtempSync(join(tmpdir(), 'ih-db-')), 'test.db');
   const first = new Store(file);
   const board = first.createBoard({ name: 'Persist', repoPath: '/r', defaultBranch: 'main' });
   first.close();
   const second = new Store(file);
   assert.equal(second.getBoard(board.id)?.name, 'Persist');
   second.close();
+});
+
+test('eventsFor returns the newest events of a long-running card, and pages forward from a position', () => {
+  const store = new Store(':memory:');
+  const board = store.createBoard({ name: 'Long', repoPath: '/tmp/repo', defaultBranch: 'main' });
+  const card = store.createCard({ boardId: board.id, title: 'Long run' });
+  for (let i = 0; i < 30; i++) store.append('session.event', card.id, { n: i }, 'agent:x');
+  const all = store.eventsFor(card.id, 0, 1000);
+  const newest = store.eventsFor(card.id, 0, 10);
+  assert.equal(newest.length, 10);
+  assert.deepEqual(newest.map((e) => e.seq), all.slice(-10).map((e) => e.seq), 'the last ten, oldest first');
+  assert.equal(newest.at(-1)!.seq, all.at(-1)!.seq, 'what just happened is included');
+  const page = store.eventsFor(card.id, all[4]!.seq, 5);
+  assert.deepEqual(page.map((e) => e.seq), all.slice(5, 10).map((e) => e.seq), 'after a position it still pages forward');
 });

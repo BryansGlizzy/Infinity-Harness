@@ -1,4 +1,4 @@
-import type { DaemonEvent, LiveMessage } from '@mh/core';
+import type { DaemonEvent, LiveMessage } from '@ih/core';
 
 /** After a drop shorter than this, the daemon replays what was missed; after a longer one the client just reloads. */
 export const REPLAY_WITHIN_MS = 10 * 60_000;

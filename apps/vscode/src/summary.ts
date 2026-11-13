@@ -1,4 +1,4 @@
-import type { Board, Card } from '@mh/core';
+import type { Board, Card } from '@ih/core';
 import type { PoolSummary, UsageSummary } from './client.ts';
 
 // Pure helpers behind the status bar and the chat view (no vscode import, so they can be tested directly).
@@ -19,7 +19,10 @@ export function poolLines(pools: PoolSummary[]): string[] {
   return pools.map((p) => {
     const top = p.status.windows.reduce<{ window: string; pct: number } | null>((a, w) => (!a || w.pct > a.pct ? w : a), null);
     const used = top ? ` · ${WINDOW[top.window] ?? top.window} ${Math.round(top.pct)}%` : '';
-    return `${POOL_ICON[p.status.state]} **${p.label}** ${p.status.state}${used}${p.running ? ` · ${p.running} working` : ''}`;
+    const h = p.health;
+    // Out of rotation or not answering outranks the quota state: nothing will be routed there.
+    const answering = h?.ejected ? ' · **out of rotation**' : h?.reachable === 'offline' ? ' · no response' : h?.reachable === 'online' && h.latencyMs !== null ? ` · online ${h.latencyMs} ms` : '';
+    return `${h?.ejected ? '$(circle-slash)' : POOL_ICON[p.status.state]} **${p.label}** ${p.status.state}${used}${answering}${p.running ? ` · ${p.running} working` : ''}`;
   });
 }
 

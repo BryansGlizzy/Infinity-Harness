@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Board, Settings } from '@mh/core';
+import type { Board, Settings } from '@ih/core';
 import { git } from './git.ts';
 
 export interface SetupResult {
@@ -57,7 +57,7 @@ export class WorktreeSetup {
 
   /** Where the "this worktree ran this command" marker lives: in the worktree's own git directory, so it is never committed or listed as a change. */
   private async marker(dir: string): Promise<string> {
-    return join(await git(dir, ['rev-parse', '--absolute-git-dir']), 'mh-worktree-setup');
+    return join(await git(dir, ['rev-parse', '--absolute-git-dir']), 'ih-worktree-setup');
   }
 
   async ensure(cardId: string, board: Board, dir: string, branch: string, settings: Pick<Settings, 'worktreeSetup' | 'worktreeSetupTimeoutSec'>): Promise<SetupResult> {
@@ -81,7 +81,7 @@ export class WorktreeSetup {
       execFile(
         'sh',
         ['-c', command],
-        { cwd: dir, timeout: timeoutSec * 1000, maxBuffer: 32 * 1024 * 1024, env: { ...this.env, MH_REPO_PATH: board.repoPath, MH_WORKTREE: dir, MH_BRANCH: branch, MH_BOARD: board.id } },
+        { cwd: dir, timeout: timeoutSec * 1000, maxBuffer: 32 * 1024 * 1024, env: { ...this.env, IH_REPO_PATH: board.repoPath, IH_WORKTREE: dir, IH_BRANCH: branch, IH_BOARD: board.id } },
         (err, stdout, stderr) => {
           const timedOut = !!err && (err as NodeJS.ErrnoException & { killed?: boolean }).killed === true;
           resolve({ ran: true, ok: !err, command, ms: Date.now() - started, output: `${stdout}${stderr}`.slice(-4000), timedOut });

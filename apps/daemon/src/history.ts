@@ -1,5 +1,5 @@
-import type { PoolSample, Store } from '@mh/db';
-import type { RateLimiter } from '@mh/gateway';
+import type { PoolSample, Store } from '@ih/db';
+import type { RateLimiter } from '@ih/gateway';
 import { isBudgetScope } from './budgets.ts';
 
 // Pool usage history (master plan Phase 6.3, from 5.6): a sample of each pool's state and windows, kept for a week.

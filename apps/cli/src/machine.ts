@@ -1,4 +1,4 @@
-import { MachineConnection, DEFAULT_REMOTE_PORT } from '@mh/client/node';
+import { MachineConnection, DEFAULT_REMOTE_PORT } from '@ih/client/node';
 import { catalogOf } from './context.ts';
 import type { Command } from './commands.ts';
 import { table } from './format.ts';

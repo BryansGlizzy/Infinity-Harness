@@ -8,7 +8,7 @@ import { expandPath, inspectFolder, prepareRepo } from '../src/projects.ts';
 import { setup } from './harness.ts';
 
 test('inspectFolder: missing, empty, files, a repo, a subfolder of a repo; directories only, hidden on request', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'mh-fs-'));
+  const root = mkdtempSync(join(tmpdir(), 'ih-fs-'));
   assert.equal(expandPath('~'), homedir());
   assert.equal(expandPath('~/x'), join(homedir(), 'x'));
 
@@ -38,7 +38,7 @@ test('inspectFolder: missing, empty, files, a repo, a subfolder of a repo; direc
 });
 
 test('prepareRepo: a new folder becomes a project; existing files are committed; subfolders of a repo and existing commits are left alone', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'mh-prep-'));
+  const root = mkdtempSync(join(tmpdir(), 'ih-prep-'));
 
   const fresh = await prepareRepo(join(root, 'new', 'thing'), 'New Thing', { create: true, gitignore: 'python' }, null);
   assert.deepEqual(fresh.did, ['created the folder', 'initialized git on main', 'added README.md', 'added .gitignore', 'made the first commit']);
@@ -72,7 +72,7 @@ test('POST /api/boards sets up a repository on request and refuses a subfolder; 
       const res = await fetch(`${base}/boards`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       return { status: res.status, body: (await res.json()) as any };
     };
-    const root = mkdtempSync(join(tmpdir(), 'mh-api-'));
+    const root = mkdtempSync(join(tmpdir(), 'ih-api-'));
     const target = join(root, 'proj');
 
     const without = await post({ name: 'Proj', repoPath: target });

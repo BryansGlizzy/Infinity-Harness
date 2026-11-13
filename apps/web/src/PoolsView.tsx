@@ -1,4 +1,4 @@
-import { effectiveAgents, type Board, type Card, type Settings } from '@mh/core';
+import { effectiveAgents, type Board, type Card, type Settings } from '@ih/core';
 import { api, type ActiveSession, type PoolWithStatus } from './api.ts';
 import { HARNESS_LABEL, ROLE_LABEL, shortModel } from './agentInfo.ts';
 import { PoolHistory } from './PoolHistory.tsx';

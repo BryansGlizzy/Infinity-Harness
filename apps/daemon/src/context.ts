@@ -1,9 +1,9 @@
 // Context capture and handoffs (master plan §5.7). Cards' specs and agents' end-of-turn summaries are saved as
 // artifacts automatically (Memorix-style autopilot capture), so search_context finds them without agents writing
 // anything; agents add decisions, contracts, findings and handoffs themselves through the board MCP.
-import { renderHandoff, type Artifact, type Card, type DaemonEvent, type Handoff, type HarnessEvent } from '@mh/core';
-import type { Store } from '@mh/db';
-import type { ContextService } from '@mh/context';
+import { renderHandoff, type Artifact, type Card, type DaemonEvent, type Handoff, type HarnessEvent } from '@ih/core';
+import type { Store } from '@ih/db';
+import type { ContextService } from '@ih/context';
 
 const harness = (e: DaemonEvent) => (e.payload as { event: HarnessEvent }).event;
 

@@ -1,5 +1,5 @@
-import type { Card } from '@mh/core';
-import type { UsageRow, UsageTotals } from '@mh/db';
+import type { Card } from '@ih/core';
+import type { UsageRow, UsageTotals } from '@ih/db';
 
 // Metrics for a board (master plan Phase 6.3): tokens and cost by agent, model, pool and card, rolled up the card tree so
 // a goal shows what its whole sub-agent tree used.

@@ -4,9 +4,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DEFAULT_SETTINGS, type HarnessEvent } from '@mh/core';
-import { FastLane, notificationJob, readNotification } from '@mh/fast-lane';
-import type { Store } from '@mh/db';
+import { DEFAULT_SETTINGS, type HarnessEvent } from '@ih/core';
+import { FastLane, notificationJob, readNotification } from '@ih/fast-lane';
+import type { Store } from '@ih/db';
 import { activeGrants, expandGrant, extraMcpServers, grantsSection, skillsSection, splitInstalled } from '../src/tools.ts';
 import { buildPrompt } from '../src/runner.ts';
 import { fakeInstaller, setup, status, waitFor } from './harness.ts';
@@ -177,7 +177,7 @@ test('tool grants: auto ones are given, approval ones hold the card until a huma
   try {
     store.updateSettings(board.id, {
       grants: {
-        browser: { label: 'Browser', description: 'A headless browser', command: 'npx', args: ['pw', '--out', '/tmp/mh-browser/{card}'], env: { OUT: '{worktree}/x' }, mode: 'approval' },
+        browser: { label: 'Browser', description: 'A headless browser', command: 'npx', args: ['pw', '--out', '/tmp/ih-browser/{card}'], env: { OUT: '{worktree}/x' }, mode: 'approval' },
         shell2: { label: 'Extra shell', description: 'Another shell', command: 'sh2', args: [], env: {}, mode: 'auto' },
         computer: { label: 'Computer', description: 'Desktop', command: '', args: [], env: {}, mode: 'off' },
       },
@@ -218,7 +218,7 @@ test('tool grants: auto ones are given, approval ones hold the card until a huma
     const servers = extraMcpServers(s, done, done.worktree!);
     assert.deepEqual(servers.map((x) => x.name), ['grant-shell2', 'grant-browser']);
     const browser = servers[1] as { command: string; args: string[]; env: { name: string; value: string }[] };
-    assert.deepEqual(browser.args, ['pw', '--out', `/tmp/mh-browser/${card.id}`]);
+    assert.deepEqual(browser.args, ['pw', '--out', `/tmp/ih-browser/${card.id}`]);
     assert.deepEqual(browser.env, [{ name: 'OUT', value: `${done.worktree}/x` }]);
     assert.match(grantsSection(s, done).join('\n'), /grant-browser \(Browser\): A headless browser/);
   } finally {
@@ -339,8 +339,8 @@ test('the shipped grants are Vercel’s agent-browser and agent-desktop, as stdi
   assert.deepEqual([computer!.command, computer!.args, computer!.mode], ['agent-desktop', ['mcp'], 'off'], 'the real desktop is opt-in');
   // One isolated session and one output folder per card.
   const s = expandGrant(browser!, { id: 'c_42' }, '/wt');
-  assert.equal(s.env.AGENT_BROWSER_SESSION, 'mh-c_42');
-  assert.equal(s.env.AGENT_BROWSER_SCREENSHOT_DIR, '/tmp/mh-browser/c_42');
+  assert.equal(s.env.AGENT_BROWSER_SESSION, 'ih-c_42');
+  assert.equal(s.env.AGENT_BROWSER_SCREENSHOT_DIR, '/tmp/ih-browser/c_42');
   assert.match(grantsSection({ grants: DEFAULT_SETTINGS.grants }, { grants: ['browser'] }).join('\n'), /agent-browser skills get core/);
 
   const { store, board, close } = await setup();
@@ -473,10 +473,10 @@ test('create_subtask tells the orchestrator when a granted tool still has to be 
 
 test('the real installer runs a shell command with the daemon’s environment, reports failure with its output, and finds commands on PATH', async () => {
   const { shellInstaller } = await import('../src/installer.ts');
-  const inst = shellInstaller({ ...process.env, MH_TEST_WORD: 'installed' });
+  const inst = shellInstaller({ ...process.env, IH_TEST_WORD: 'installed' });
   assert.equal(inst.isInstalled('node'), true);
   assert.equal(inst.isInstalled('definitely-not-a-real-command-xyz'), false);
-  const ok = await inst.run('echo $MH_TEST_WORD && true');
+  const ok = await inst.run('echo $IH_TEST_WORD && true');
   assert.deepEqual([ok.ok, ok.output.trim()], [true, 'installed']);
   const bad = await inst.run('echo nope >&2; exit 3');
   assert.deepEqual([bad.ok, bad.output.trim()], [false, 'nope']);

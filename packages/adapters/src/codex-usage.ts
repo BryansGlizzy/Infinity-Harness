@@ -56,7 +56,7 @@ export function readCodexRateLimits(binary: string, env: NodeJS.ProcessEnv, time
       }
     });
     const send = (o: object) => child.stdin.write(JSON.stringify(o) + '\n');
-    send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'meta-harness', version: '0' } } });
+    send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'infinity-harness', version: '0' } } });
     send({ method: 'initialized' });
     send({ id: 2, method: 'account/rateLimits/read' });
   });

@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import type { DaemonEvent } from '@mh/core';
-import { Store } from '@mh/db';
-import { AcpAgent } from '@mh/adapters';
-import { RateLimiter } from '@mh/gateway';
+import type { DaemonEvent } from '@ih/core';
+import { Store } from '@ih/db';
+import { AcpAgent } from '@ih/adapters';
+import { RateLimiter } from '@ih/gateway';
 import type { DaemonConfig } from '../src/config.ts';
 import { commitAll, commitsAhead, ensureWorktree, git, inspectRepo, removeUntracked } from '../src/git.ts';
 import { reservePaths } from '../src/leases.ts';
@@ -19,7 +19,7 @@ import { buildServer } from '../src/server.ts';
 const fakeAgent = fileURLToPath(new URL('../../../packages/adapters/test/fake-agent.mjs', import.meta.url));
 
 async function tempRepo(): Promise<string> {
-  const repo = mkdtempSync(join(tmpdir(), 'mh-repo-'));
+  const repo = mkdtempSync(join(tmpdir(), 'ih-repo-'));
   await git(repo, ['init', '-q', '-b', 'main']);
   writeFileSync(join(repo, 'README.md'), '# demo\n');
   await commitAll(repo, 'init');
@@ -48,7 +48,7 @@ function config(dataDir: string): DaemonConfig {
 /** A runner on a temp repo with the scripted fake agent; `listen` also serves the board MCP endpoint. */
 async function setup(opts: { listen?: boolean } = {}) {
   const repo = await tempRepo();
-  const dataDir = mkdtempSync(join(tmpdir(), 'mh-data-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'ih-data-'));
   const cfg = config(dataDir);
   const store = new Store(':memory:');
   const runner = new Runner(store, cfg, {
@@ -105,15 +105,15 @@ function prompts(store: Store, cardId: string): string {
 test('git helpers: inspect, worktree, commit, ahead count', async () => {
   const repo = await tempRepo();
   assert.deepEqual(await inspectRepo(repo), { defaultBranch: 'main' });
-  await assert.rejects(inspectRepo(mkdtempSync(join(tmpdir(), 'mh-empty-'))), /not a git repository/);
+  await assert.rejects(inspectRepo(mkdtempSync(join(tmpdir(), 'ih-empty-'))), /not a git repository/);
 
-  const dir = join(mkdtempSync(join(tmpdir(), 'mh-wt-')), 'card');
-  await ensureWorktree(repo, dir, 'mh/test', 'main');
-  await ensureWorktree(repo, dir, 'mh/test', 'main'); // idempotent
+  const dir = join(mkdtempSync(join(tmpdir(), 'ih-wt-')), 'card');
+  await ensureWorktree(repo, dir, 'ih/test', 'main');
+  await ensureWorktree(repo, dir, 'ih/test', 'main'); // idempotent
   assert.equal(await commitAll(dir, 'nothing'), null);
   writeFileSync(join(dir, 'a.txt'), 'a\n');
   assert.match((await commitAll(dir, 'add a')) ?? '', /^[0-9a-f]{40}$/);
-  assert.equal(await commitsAhead(repo, 'main', 'mh/test'), 1);
+  assert.equal(await commitsAhead(repo, 'main', 'ih/test'), 1);
 
   // Harness-written stray files are removed while untracked; tracked files under the same path stay.
   mkdirSync(join(dir, 'skills', 'system', 'x'), { recursive: true });
@@ -137,7 +137,7 @@ test('running a card: worktree, agent session, events, commit, review, idle sess
 
     const after = store.getCard(card.id)!;
     assert.equal(after.status, 'review');
-    assert.ok(after.branch?.startsWith('mh/write-the-notes-file-'));
+    assert.ok(after.branch?.startsWith('ih/write-the-notes-file-'));
     assert.ok(existsSync(join(after.worktree!, 'notes.md')));
     assert.equal(await commitsAhead(repo, 'main', after.branch!), 1);
     assert.equal(store.listSessions(card.id)[0]?.state, 'idle');
@@ -187,7 +187,7 @@ test('workers are told their test command and may use scratch space and the git 
   const { repo, store, runner, board, close } = await setup();
   try {
     store.updateSettings(board.id, { testCommand: 'pnpm test' });
-    const description = ['SHELL ls /tmp/mh-scratch-elsewhere', `SHELL cat ${repo}/.git/HEAD`, `SHELL cat ${repo}/README.md`].join('\n');
+    const description = ['SHELL ls /tmp/ih-scratch-elsewhere', `SHELL cat ${repo}/.git/HEAD`, `SHELL cat ${repo}/README.md`].join('\n');
     const shared = store.createCard({ boardId: board.id, title: 'Shared tools', description });
     let done = settled(store, shared.id);
     await runner.run(shared.id, 'fake');

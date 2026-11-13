@@ -1,4 +1,4 @@
-import type { ConnectionOptions } from '@mh/client/node';
+import type { ConnectionOptions } from '@ih/client/node';
 
 /** Everything the CLI touches outside its arguments, so tests can run it in-process. */
 export interface Io {

@@ -12,7 +12,7 @@ import type { Io } from '../src/io.ts';
 type Env = Awaited<ReturnType<typeof setup>>;
 
 function harness(t: Env, extra: Partial<Io> = {}) {
-  const config = mkdtempSync(join(tmpdir(), 'mh-ih-'));
+  const config = mkdtempSync(join(tmpdir(), 'ih-ih-'));
   const ih = async (args: string[], over: Partial<Io> = {}) => {
     let out = '';
     let err = '';
@@ -137,6 +137,48 @@ test('needs, approve and deny', async () => {
   }
 });
 
+test('pools show whether the model answers; pool test and restore; messages list and clear', async () => {
+  const t = await setup();
+  const { ih } = harness(t);
+  try {
+    // Pools: a MODEL column, "OUT of rotation" once a pool was taken out.
+    t.health.eject('fa', 'no answer within 8 s');
+    const pools = (await ih(['pools'])).json() as { id: string; health?: { ejected: { reason: string } | null } }[];
+    assert.match(pools.find((p) => p.id === 'fa')!.health!.ejected!.reason, /no answer/);
+    const table = (await ih(['pools'], { tty: true })).out;
+    assert.match(table, /MODEL/);
+    assert.match(table, /fa\s+open\s+OUT of rotation/);
+
+    const tested = await ih(['pool', 'test', 'fa'], { tty: true });
+    assert.match(tested.out, /fa: online/);
+    assert.match(tested.out, /out of rotation since .*: no answer within 8 s/);
+    assert.match(tested.out, /ih pool restore fa/);
+    assert.ok(t.health.ejection('fa'), 'testing does not put it back');
+    assert.match((await ih(['pool', 'restore', 'fa'], { tty: true })).out, /fa is back in rotation/);
+    assert.equal(t.health.ejection('fa'), null);
+    assert.equal((await ih(['pool', 'frob', 'fa'])).code, 2);
+    assert.equal((await ih(['pool', 'test'])).code, 2);
+    assert.equal((await ih(['pool', 'test', 'nope'])).code, 1, 'an unknown pool is the daemon refusing');
+
+    // Messages for the user.
+    const card = t.store.createCard({ boardId: t.board.id, title: 'Chatty' });
+    const say = (body: string) => t.store.postMessage({ boardId: t.board.id, fromActor: `card:${card.id}`, toCard: null, body, urgent: false });
+    const [a, b] = [say('first question'), say('second question')];
+    const listed = (await ih(['messages'])).json() as { id: string }[];
+    assert.deepEqual(listed.map((m) => m.id).sort(), [a.id, b.id].sort());
+    assert.match((await ih(['messages'], { tty: true })).out, /first question/);
+    assert.deepEqual((await ih(['messages', 'clear', a.id])).json().dismissed, [a.id]);
+    assert.deepEqual(((await ih(['messages'])).json() as { id: string }[]).map((m) => m.id), [b.id]);
+    assert.deepEqual(((await ih(['needs'])).json() as { kind: string }[]).map((n) => n.kind), ['message'], 'needs lists what is left');
+    assert.equal((await ih(['messages', 'clear'])).json().dismissed.length, 1);
+    assert.deepEqual((await ih(['messages'])).json(), []);
+    assert.match((await ih(['messages'], { tty: true })).out, /No messages for you/);
+    assert.equal((await ih(['messages', 'frob'])).code, 2);
+  } finally {
+    await t.close();
+  }
+});
+
 test('watch follows the event stream and stops after N events', async () => {
   const t = await setup();
   const { ih } = harness(t);
@@ -238,7 +280,7 @@ test('the skill file: valid, honest about the commands it names, and installable
   const t = await setup();
   try {
     const { ih } = harness(t);
-    const home = mkdtempSync(join(tmpdir(), 'mh-skill-'));
+    const home = mkdtempSync(join(tmpdir(), 'ih-skill-'));
     const env = { HOME: home, XDG_CONFIG_HOME: home };
     const shown = await ih(['skill', 'show'], { env });
     assert.equal(shown.out, text);
@@ -266,6 +308,30 @@ test('the skill file: valid, honest about the commands it names, and installable
     assert.equal((await ih(['skill', 'install', '--dir', custom], { env })).code, 0);
     assert.ok(existsSync(join(custom, 'infinity-harness', 'SKILL.md')));
     assert.equal((await ih(['skill', 'install', '--target', 'nope'], { env })).code, 2);
+  } finally {
+    await t.close();
+  }
+});
+
+test('weight: shows and sets the routing weight per agent, rejects nonsense, and the daemon applies it', async () => {
+  const t = await setup();
+  const { ih } = harness(t);
+  try {
+    const shown = (await ih(['weight'])).json();
+    assert.ok(Object.keys(shown).length > 0, 'workers are listed');
+    assert.ok(Object.values(shown).every((v) => v === 1));
+    const agent = Object.keys(shown)[0]!;
+    assert.deepEqual((await ih(['weight', agent, '2.5'])).json(), { [agent]: 2.5 });
+    assert.equal(t.store.getSettings(t.board.id).agentWeights[agent], 2.5);
+    assert.equal((await ih(['weight', agent])).json()[agent], 2.5);
+    assert.match((await ih(['weight'], { tty: true })).out, /AGENT\s+MODEL\s+WEIGHT/);
+    assert.equal((await ih(['weight', agent, '11'])).code, 2);
+    assert.equal((await ih(['weight', agent, 'lots'])).code, 2);
+    assert.equal((await ih(['weight', 'nobody', '2'])).code, 2);
+    const res = await fetch(`http://127.0.0.1:${t.cfg.port}/api/boards/${t.board.id}/settings`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentWeights: { [agent]: -1 } }) });
+    assert.equal(res.status, 400);
+    assert.deepEqual((await ih(['weight', agent, 'reset'])).json(), {});
+    assert.equal(t.store.getSettings(t.board.id).agentWeights[agent], undefined);
   } finally {
     await t.close();
   }

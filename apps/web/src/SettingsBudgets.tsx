@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { effectiveAgents, type Budget, type Settings } from '@mh/core';
+import { effectiveAgents, type Budget, type Settings } from '@ih/core';
 import type { PoolWithStatus } from './api.ts';
 
 /** One budget: a limit (empty for none), what it counts, and over which window. */

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { codexEnv } from '@mh/adapters';
+import { codexEnv } from '@ih/adapters';
 import { buildPrompt } from '../src/runner.ts';
 import { setup, status, waitFor } from './harness.ts';
 
@@ -20,7 +20,7 @@ async function api(port: number, method: string, path: string, body?: unknown) {
 test('boards default by folder: a git repo gets worktrees, any other folder direct mode; either can be chosen', async () => {
   const { repo, cfg, close } = await setup();
   try {
-    const plain = mkdtempSync(join(tmpdir(), 'mh-plain-'));
+    const plain = mkdtempSync(join(tmpdir(), 'ih-plain-'));
     writeFileSync(join(plain, 'notes.txt'), 'hi\n');
     const git = await api(cfg.port, 'POST', '/boards', { name: 'Repo', repoPath: repo });
     assert.equal(git.body.mode, 'worktree');
@@ -43,7 +43,7 @@ test('boards default by folder: a git repo gets worktrees, any other folder dire
 test('a direct card edits the folder itself, finishes Done without git, and its changes are the files it touched', async () => {
   const { store, runner, cfg, close } = await setup();
   try {
-    const folder = mkdtempSync(join(tmpdir(), 'mh-direct-'));
+    const folder = mkdtempSync(join(tmpdir(), 'ih-direct-'));
     const board = store.createBoard({ name: 'Direct', repoPath: folder, defaultBranch: '', mode: 'direct' });
     const card = store.createCard({ boardId: board.id, title: 'Write notes' });
     const done = waitFor(store, status(store, card.id, 'done'));
@@ -71,12 +71,14 @@ test('a direct card edits the folder itself, finishes Done without git, and its 
   }
 });
 
-test('direct boards run one worker at a time by default and never form a council', async () => {
+test('direct boards run workers up to directParallel (default 3) and never form a council', async () => {
   const { store, scheduler, council, close } = await setup();
   try {
-    const folder = mkdtempSync(join(tmpdir(), 'mh-direct-'));
+    const folder = mkdtempSync(join(tmpdir(), 'ih-direct-'));
     const board = store.createBoard({ name: 'Direct', repoPath: folder, defaultBranch: '', mode: 'direct' });
+    assert.equal(store.getSettings(board.id).directParallel, 3, 'the default');
     store.updateSettings(board.id, {
+      directParallel: 1,
       poolSlots: { fa: 3, fb: 3 },
       agents: [
         { id: 'o1', poolId: 'fa', model: '', role: 'orchestrator', delegatesTo: [], enabled: true },
@@ -99,11 +101,26 @@ test('direct boards run one worker at a time by default and never form a council
   }
 });
 
+test('direct boards start independent cards together by default', async () => {
+  const { store, scheduler, close } = await setup();
+  try {
+    const folder = mkdtempSync(join(tmpdir(), 'ih-direct-'));
+    const board = store.createBoard({ name: 'Direct', repoPath: folder, defaultBranch: '', mode: 'direct' });
+    store.updateSettings(board.id, { poolSlots: { fa: 3, fb: 3 } });
+    const cards = ['SLOW one', 'SLOW two'].map((title) => store.createCard({ boardId: board.id, title, status: 'ready' }));
+    scheduler.start();
+    await waitFor(store, () => cards.every((c) => store.getCard(c.id)!.status === 'in_progress'));
+    for (const c of cards) await waitFor(store, status(store, c.id, 'done'));
+  } finally {
+    await close();
+  }
+});
+
 test('codexEnv: live web search by default, without overriding the user’s own CODEX_CONFIG', () => {
   assert.deepEqual(JSON.parse(codexEnv({}).CODEX_CONFIG!), { web_search: 'live' });
   assert.deepEqual(JSON.parse(codexEnv({ CODEX_CONFIG: '{"web_search":"disabled","model":"x"}' }).CODEX_CONFIG!), { web_search: 'disabled', model: 'x' });
   assert.equal(codexEnv({ CODEX_CONFIG: 'not json' }).CODEX_CONFIG, 'not json');
   // The worktree prompt is unchanged for normal boards.
-  const card = { id: 'c_1', title: 'T', description: '', branch: 'mh/t' } as any;
-  assert.match(buildPrompt(card, { name: 'B', mode: 'worktree' } as any, '/wt'), /a git worktree on branch mh\/t/);
+  const card = { id: 'c_1', title: 'T', description: '', branch: 'ih/t' } as any;
+  assert.match(buildPrompt(card, { name: 'B', mode: 'worktree' } as any, '/wt'), /a git worktree on branch ih\/t/);
 });

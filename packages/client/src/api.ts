@@ -1,7 +1,7 @@
 // The daemon's REST API, one typed method per endpoint. Methods are arrow properties so they survive being passed around.
-import type { Approval, Artifact, ArtifactKind, Board, Card, CardStatus, ChatItem, DaemonEvent, Dependency, Lease, Message, Outcome, RoutingRules, Session, Settings } from '@mh/core';
+import type { Approval, Artifact, BoardRemovalInfo, DirListing, FileContent, Mention, BoardRemovalMode, BoardRemovalResult, DrafterMode, PeerCaps, FedRequest, FederationNeeds, FederationSettings, Peer, PeerProject, ProjectCard, RequestBudget, RequestResolution, SharedProject, Visibility, ArtifactKind, Board, Card, CardStatus, ChatItem, DaemonEvent, Dependency, Lease, Message, Outcome, Pool, RoutingRules, Session, Settings } from '@ih/core';
 import { DaemonHttp } from './http.ts';
-import type { ActiveSession, AgentPrior, Candidate, CardChanges, FolderInfo, MetricsReport, ModelCatalog, PoolHistoryData, PoolStatus, PoolWithStatus, RepoSetup, ReviewComment, SearchHit, UsageSummary } from './types.ts';
+import type { FederationOverview, PeerDetail, PeerHit, PeerPreview, ActiveSession, AgentPrior, Candidate, CardChanges, FolderInfo, HarnessLoginFlow, MetricsReport, ModelCatalog, PoolHealthView, PoolHistoryData, PoolStatus, PoolWithStatus, RepoSetup, ReviewComment, SearchHit, SystemHarnessId, SystemHarnessStatus, UsageSummary } from './types.ts';
 
 const GOAL_TIMEOUT_MS = 180_000;
 const INSTALL_TIMEOUT_MS = 20 * 60_000;
@@ -43,6 +43,10 @@ export class DaemonApi {
   // --- pools and models
   pools = () => this.call<PoolWithStatus[]>('GET', '/api/pools');
   activeSessions = () => this.call<ActiveSession[]>('GET', '/api/sessions/active');
+  /** Checks now whether the pool's model is answering. */
+  testPool = (id: string) => this.call<PoolHealthView>('POST', `/api/pools/${id}/test`);
+  /** Puts a pool that was taken out of rotation back in. */
+  restorePool = (id: string) => this.call<PoolHealthView>('POST', `/api/pools/${id}/restore`);
   forcePool = (id: string, pct: number | null) => this.call<PoolStatus>('POST', `/api/pools/${id}/force`, { pct });
   models = (refresh = false) => this.call<ModelCatalog>('GET', `/api/models${refresh ? '?refresh=1' : ''}`, undefined, refresh ? 120_000 : undefined);
   poolHistory = (poolId: string, hours = 24) => this.call<PoolHistoryData>('GET', `/api/pools/${poolId}/history?hours=${hours}`);
@@ -50,6 +54,15 @@ export class DaemonApi {
   // --- boards and cards
   boards = () => this.call<Board[]>('GET', '/api/boards');
   createBoard = (name: string, repoPath: string, setup?: RepoSetup, mode?: Board['mode']) => this.call<Board & { setup: string[] }>('POST', '/api/boards', { name, repoPath, setup, mode });
+  /** A folder of the project (or of one card's worktree), read-only, for the file tree. */
+  listFiles = (boardId: string, path = '', cardId?: string) => this.call<DirListing>('GET', `/api/boards/${boardId}/files?${new URLSearchParams({ path, ...(cardId ? { card: cardId } : {}) })}`);
+  readFile = (boardId: string, path: string, cardId?: string) => this.call<FileContent>('GET', `/api/boards/${boardId}/file?${new URLSearchParams({ path, ...(cardId ? { card: cardId } : {}) })}`);
+  /** Projects of other swarms that can be typed after an @ in a prompt. */
+  mentions = () => this.call<Mention[]>('GET', '/api/federation/mentions');
+  /** What removing a board would touch. */
+  boardRemoval = (id: string) => this.call<BoardRemovalInfo>('GET', `/api/boards/${id}/removal`);
+  /** `forget`: take the board out of Infinity Harness (the folder stays). `delete`: also delete the project folder; the board's name must be passed back as `confirmName`. */
+  removeBoard = (id: string, mode: BoardRemovalMode, confirmName?: string) => this.call<BoardRemovalResult>('POST', `/api/boards/${id}/remove`, { mode, confirmName }, 120_000);
   folder = (path: string, hidden = false) => this.call<FolderInfo>('GET', `/api/fs?${new URLSearchParams({ path, ...(hidden ? { hidden: '1' } : {}) })}`);
   cards = (boardId: string) => this.call<Card[]>('GET', `/api/boards/${boardId}/cards`);
   createCard = (boardId: string, title: string, description: string, status?: CardStatus) => this.call<Card>('POST', `/api/boards/${boardId}/cards`, { title, description, status });
@@ -73,6 +86,8 @@ export class DaemonApi {
 
   // --- messages
   messages = (boardId: string) => this.call<Message[]>('GET', `/api/boards/${boardId}/messages`);
+  /** Clears messages for the humans from the attention list: the given ids, or all of the board's. */
+  dismissMessages = (boardId: string, ids?: string[]) => this.call<{ dismissed: string[] }>('POST', `/api/boards/${boardId}/messages/dismiss`, ids ? { ids } : {});
   sendMessage = (id: string, body: string, urgent = false) => this.call<Message>('POST', `/api/cards/${id}/messages`, { body, urgent });
 
   // --- context
@@ -110,7 +125,53 @@ export class DaemonApi {
   tools = (boardId: string) => this.call<{ name: string; command: string; installed: boolean; installable: boolean }[]>('GET', `/api/boards/${boardId}/tools`);
   installTool = (boardId: string, grant: string) => this.call<{ ok: boolean; output: string; installed: boolean }>('POST', `/api/boards/${boardId}/tools/${grant}/install`, undefined, INSTALL_TIMEOUT_MS);
 
+  // --- system harnesses (discovery, install, sign-in, .env config)
+  harnesses = () => this.call<SystemHarnessStatus[]>('GET', '/api/harnesses');
+  installHarness = (id: SystemHarnessId) =>
+    this.call<{ ok: boolean; output: string; harness: SystemHarnessStatus; pools: Pool[] }>('POST', `/api/harnesses/${encodeURIComponent(id)}/install`, undefined, INSTALL_TIMEOUT_MS);
+  loginHarness = (id: SystemHarnessId, opts: { apiKey?: string; mode?: string } = {}) =>
+    this.call<{ flow: HarnessLoginFlow | null; harness: SystemHarnessStatus; pools: Pool[] }>('POST', `/api/harnesses/${encodeURIComponent(id)}/login`, opts, 60_000);
+  cancelHarnessLogin = (id: SystemHarnessId) =>
+    this.call<{ ok: boolean; harness: SystemHarnessStatus }>('POST', `/api/harnesses/${encodeURIComponent(id)}/login/cancel`);
+  configureHarnessEnv = (patch: { nimApiKey?: string; nimModel?: string; localBaseUrl?: string; localModel?: string }) =>
+    this.call<{ harness: SystemHarnessStatus; pools: Pool[] }>('POST', '/api/harnesses/env', patch);
+
   // --- settings
   settings = (boardId: string) => this.call<Settings>('GET', `/api/boards/${boardId}/settings`);
   updateSettings = (boardId: string, patch: Partial<Settings>) => this.call<Settings>('PATCH', `/api/boards/${boardId}/settings`, patch);
+
+  // --- swarm federation (Phase 7)
+  federation = () => this.call<FederationOverview>('GET', '/api/federation');
+  /** Needs-you items from peers: knocks waiting for a decision and requests waiting for approval. */
+  federationNeeds = async (): Promise<FederationNeeds> => (await this.federation()).needs;
+  updateFederation = (patch: Partial<FederationSettings>) => this.call<FederationSettings>('PATCH', '/api/federation/settings', patch);
+  peers = () => this.call<Peer[]>('GET', '/api/federation/peers');
+  peer = (id: string) => this.call<PeerDetail>('GET', `/api/federation/peers/${encodeURIComponent(id)}`);
+  addPeer = (input: { label: string; ssh?: { target: string; sshPort?: number; remotePort?: number }; url?: string; expectedFingerprint?: string; shares?: Visibility }) => this.call<Peer>('POST', '/api/federation/peers', input);
+  decidePeer = (id: string, decision: 'approve' | 'deny' | 'block') => this.call<{ peer: Peer | null }>('POST', `/api/federation/peers/${encodeURIComponent(id)}/decide`, { decision });
+  updatePeer = (id: string, patch: { ssh?: { target: string; sshPort?: number; remotePort?: number }; url?: string; label?: string; trust?: 'verified' | 'trusted' | 'blocked'; shares?: Visibility; enabled?: boolean; autoAccept?: boolean; caps?: PeerCaps }) => this.call<Peer>('PATCH', `/api/federation/peers/${encodeURIComponent(id)}`, patch);
+  removePeer = (id: string) => this.call<{ ok: boolean }>('DELETE', `/api/federation/peers/${encodeURIComponent(id)}`);
+  pollPeer = (id: string) => this.call<Peer>('POST', `/api/federation/peers/${encodeURIComponent(id)}/poll`, undefined, 60_000);
+  previewPeer = (id: string) => this.call<PeerPreview>('GET', `/api/federation/peers/${encodeURIComponent(id)}/preview`);
+  peerProjects = (q?: string) => this.call<PeerHit[]>('GET', `/api/federation/projects${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+  sharedProjects = () => this.call<SharedProject[]>('GET', '/api/federation/shared');
+  draftProject = (boardId: string, mode?: DrafterMode) => this.call<{ shared?: SharedProject; started?: Card }>('POST', `/api/federation/shared/${boardId}/draft`, { mode }, GOAL_TIMEOUT_MS);
+  saveProjectDraft = (boardId: string, card: Partial<ProjectCard>) => this.call<SharedProject>('PUT', `/api/federation/shared/${boardId}/draft`, { card });
+  publishProject = (boardId: string, visibility: Visibility) => this.call<SharedProject>('POST', `/api/federation/shared/${boardId}/publish`, { visibility });
+  unpublishProject = (boardId: string) => this.call<SharedProject>('POST', `/api/federation/shared/${boardId}/unpublish`);
+  peerRequests = (opts: { direction?: 'in' | 'out'; peer?: string; open?: boolean } = {}) =>
+    this.call<FedRequest[]>('GET', `/api/federation/requests?${new URLSearchParams({ ...(opts.direction ? { direction: opts.direction } : {}), ...(opts.peer ? { peer: opts.peer } : {}), ...(opts.open ? { open: '1' } : {}) })}`);
+  peerRequest = (id: string) => this.call<FedRequest>('GET', `/api/federation/requests/${encodeURIComponent(id)}`);
+  sendPeerRequest = (input: { peer: string; title: string; description: string; project?: string; blocking?: boolean; acceptance?: string[]; milestones?: string[]; budget?: RequestBudget }) => this.call<FedRequest>('POST', '/api/federation/requests', input, 60_000);
+  approvePeerRequest = (id: string, note?: string) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/approve`, { note }, GOAL_TIMEOUT_MS);
+  declinePeerRequest = (id: string, reason: string) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/decline`, { reason });
+  askPeerInfo = (id: string, question: string) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/info`, { question });
+  cannotReproducePeerRequest = (id: string, note: string) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/cannot-reproduce`, { note });
+  landPeerRequest = (id: string, resolution: RequestResolution) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/landed`, resolution);
+  commentPeerRequest = (id: string, text: string) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/comment`, { text }, 60_000);
+  cancelPeerRequest = (id: string) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/cancel`, undefined, 60_000);
+  reopenPeerRequest = (id: string, reason: string) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/reopen`, { reason }, 60_000);
+  markPeerMilestone = (id: string, index: number, done = true) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/milestone`, { index, done });
+  setPeerRequestBudget = (id: string, budget: { maxUsd?: number; maxTokens?: number } | null) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/budget`, budget ?? {});
+  confirmPeerRequest = (id: string) => this.call<FedRequest>('POST', `/api/federation/requests/${id}/confirm`, undefined, 60_000);
 }

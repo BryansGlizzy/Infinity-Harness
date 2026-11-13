@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 node_modules/
+.infinity-harness/
 .meta-harness/
 dist/
 *.tsbuildinfo
@@ -9,3 +10,20 @@ dist/
 
 # Third-party projects cloned for study (not part of this repo)
 research/
+
+# Local state, secrets, caches and build artifacts
+.pytest_cache/
+__pycache__/
+*.log
+*.vsix
+*.pem
+*.key
+.vscode-test/
+apps/vscode/dist/
+apps/web/dist/
+.idea/
+.vscode/
+Thumbs.db
+*.db
+*.db-wal
+*.db-shm

@@ -1,8 +1,8 @@
-import type { Board, Card } from '@mh/core';
-import { outcomeValue } from '@mh/core';
-import type { Store } from '@mh/db';
-import { trimInput } from '@mh/fast-lane';
-import type { KevClient } from '@mh/router';
+import type { Board, Card } from '@ih/core';
+import { outcomeValue } from '@ih/core';
+import type { Store } from '@ih/db';
+import { trimInput } from '@ih/fast-lane';
+import type { KevClient } from '@ih/router';
 import { currentArtifact } from './context.ts';
 import { branchDiff, removeWorktree } from './git.ts';
 import type { Runner } from './runner.ts';

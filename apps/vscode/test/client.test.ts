@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Board, DaemonEvent, LiveMessage } from '@mh/core';
+import type { Board, DaemonEvent, LiveMessage } from '@ih/core';
 import { setup, status, waitFor } from '../../daemon/test/harness.ts';
 import { DaemonClient, EventStream, HttpError } from '../src/client.ts';
 import { boardsForFolders, folderInRepo } from '../src/match.ts';
@@ -13,7 +13,7 @@ import { boardsForFolders, folderInRepo } from '../src/match.ts';
 const board = (id: string, repoPath: string): Board => ({ id, name: id, repoPath, defaultBranch: 'main', mode: 'worktree', createdAt: '' });
 
 test('boardsForFolders: the board whose repository holds the workspace folder, closest first', () => {
-  const base = mkdtempSync(join(tmpdir(), 'mh-vsc-'));
+  const base = mkdtempSync(join(tmpdir(), 'ih-vsc-'));
   for (const d of ['repo/app/src', 'repo/app/inner', 'other']) mkdirSync(join(base, d), { recursive: true });
   const outer = board('outer', join(base, 'repo'));
   const inner = board('inner', join(base, 'repo', 'app'));
@@ -76,6 +76,13 @@ test('status summaries: pools with their fullest window, recent usage, budgets t
     { id: 'nim', label: 'NVIDIA NIM', running: 0, status: { state: 'open' as const, windows: [] } },
   ];
   assert.deepEqual(poolLines(pools), ['$(warning) **Claude Pro** warn · 5-hour 82% · 1 working', '$(circle-filled) **NVIDIA NIM** open']);
+  // Whether the model answers shows beside the quota, and a pool out of rotation says so.
+  const healthy = [
+    { ...pools[1]!, health: { reachable: 'online' as const, latencyMs: 41, ejected: null } },
+    { id: 'local', label: 'Local LLM', running: 0, status: { state: 'open' as const, windows: [] }, health: { reachable: 'offline' as const, latencyMs: null, ejected: { since: 'x', reason: 'down' } } },
+    { id: 'x', label: 'Quiet', running: 0, status: { state: 'open' as const, windows: [] }, health: { reachable: 'offline' as const, latencyMs: null, ejected: null } },
+  ];
+  assert.deepEqual(poolLines(healthy), ['$(circle-filled) **NVIDIA NIM** open · online 41 ms', '$(circle-slash) **Local LLM** open · **out of rotation**', '$(circle-filled) **Quiet** open · no response']);
   const usage = { hours: 24, totals: { tokens: 15_000, costUsd: 0.42, requests: 9 }, budgets: [{ scope: 'board', pct: 85, state: 'warn' as const }, { scope: 'kimi', pct: 10, state: 'open' as const }] };
   assert.deepEqual(usageLines(usage), ['Last 24h: 15k tokens · $0.42', '$(warning) Budget for the board at 85%']);
   assert.deepEqual(usageLines(null), []);

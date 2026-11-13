@@ -1,5 +1,5 @@
 {
-  "name": "@mh/client",
+  "name": "@ih/client",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,6 +8,6 @@
     "./node": "./src/node/index.ts"
   },
   "dependencies": {
-    "@mh/core": "workspace:*"
+    "@ih/core": "workspace:*"
   }
 }

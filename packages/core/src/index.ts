@@ -1,5 +1,7 @@
 // Shared types for the daemon, adapters and web UI.
 
+export * from './federation.ts';
+
 export const CARD_STATUSES = ['backlog', 'ready', 'in_progress', 'review', 'merging', 'done', 'blocked'] as const;
 export type CardStatus = (typeof CARD_STATUSES)[number];
 
@@ -9,6 +11,44 @@ export type CardStatus = (typeof CARD_STATUSES)[number];
  * default for a folder that isn't a git repository (master plan Phase 6.1).
  */
 export type BoardMode = 'worktree' | 'direct';
+
+/** What removing a board would touch, shown before the person chooses (`GET /api/boards/:id/removal`). */
+export interface BoardRemovalInfo {
+  board: Board;
+  cards: number;
+  /** Agent sessions working or waiting on its cards. */
+  running: number;
+  /** Cards in the merge queue right now. */
+  merging: number;
+  worktrees: number;
+  /** Card worktrees with changes nobody committed. */
+  dirtyWorktrees: number;
+  folder: {
+    exists: boolean;
+    git: boolean;
+    /** Changed files in the project folder itself; null when it is not a repository. */
+    uncommitted: number | null;
+    /** Branches of this board's cards holding work that has not landed on the default branch. */
+    unlandedBranches: number | null;
+  };
+  federation: { sharing: boolean; openIn: number; openOut: number };
+  /** Why "delete the folder too" is not offered for this board, or null. */
+  deleteBlocked: string | null;
+  /** Why the board cannot be removed at all right now, or null. */
+  blocked: string | null;
+}
+
+export type BoardRemovalMode = 'forget' | 'delete';
+
+export interface BoardRemovalResult {
+  removed: true;
+  mode: BoardRemovalMode;
+  /** Card worktrees left on disk because they hold uncommitted changes. */
+  keptWorktrees: string[];
+  /** The project folder that was deleted (mode `delete`), else null. */
+  deletedFolder: string | null;
+  unlandedBranches: number | null;
+}
 
 export interface Board {
   id: string;
@@ -87,6 +127,14 @@ export interface Pipeline {
   humanReview?: HumanReview;
   /** Set on a card run as several candidates at once (best-of-N, Phase 6.5). */
   bestOf?: BestOf;
+  /** Requests to other swarms (ids of this daemon's outbound requests) the card waits for before it runs again (Phase 7). */
+  waitingOn?: string[];
+  /** Outbound requests that are confirmed done when this card is done: it was resumed to check what a peer landed. */
+  confirms?: string[];
+  /** On a finished goal: the card where the orchestrator wrote its final summary, and how many finished cards it covered. */
+  finalSummary?: { cardId: string; cards: number; at: string };
+  /** On a summary card: the goal it summarizes. */
+  summaryOf?: string;
 }
 
 /** The operator reviews a card's branch: approve it for landing, or send it back to its author with notes. */
@@ -389,9 +437,9 @@ export const DEFAULT_GRANTS: Record<string, ToolGrant> = {
     args: ['mcp'],
     // One isolated session per card; screenshots and downloads stay out of the worktree; an idle browser exits after 5 minutes.
     env: {
-      AGENT_BROWSER_SESSION: 'mh-{card}',
-      AGENT_BROWSER_SCREENSHOT_DIR: '/tmp/mh-browser/{card}',
-      AGENT_BROWSER_DOWNLOAD_PATH: '/tmp/mh-browser/{card}/downloads',
+      AGENT_BROWSER_SESSION: 'ih-{card}',
+      AGENT_BROWSER_SCREENSHOT_DIR: '/tmp/ih-browser/{card}',
+      AGENT_BROWSER_DOWNLOAD_PATH: '/tmp/ih-browser/{card}/downloads',
       AGENT_BROWSER_IDLE_TIMEOUT_MS: '300000',
     },
     usage: 'Before the first use, run `agent-browser skills get core` and follow it.',
@@ -442,6 +490,8 @@ export interface RolePermissions {
   canInstallMcp?: boolean;
   /** `request_grant`, and `grants` on `create_subtask`: ask for a tool grant (Phase 6.5). */
   canRequestGrants?: boolean;
+  /** `request_peer`: ask another swarm for a fix, a piece of work or an answer (Phase 7). Waits for a human only if Settings.peerRequestApproval is on. */
+  canRequestPeers?: boolean;
 }
 
 /** Board-wide settings, editable in the UI (master plan §2.6, §5.9). */
@@ -452,6 +502,12 @@ export interface Settings {
   poolSlots: Record<string, number>;
   /** Multiplier per pool in the routing score; lower means "use only when others are busy". */
   scarcity: Record<string, number>;
+  /**
+   * Your own thumb on the scale, per agent id (default 1, range 0–10): the routing score is multiplied by it. Above 1
+   * it favours the agent, but only for cards at or below the complexity it handles well; below 1 it is used less; 0
+   * switches it off for automatic routing (a card can still be run on it by hand).
+   */
+  agentWeights: Record<string, number>;
   /** Claude Pro share (percent of the 5h window) kept for the orchestrator; workers stop at 100 − reserve. */
   claudeReservePct: number;
   /** Same for Codex: workers stop taking cards when its 5-hour usage passes 100 − this, keeping the rest for the orchestrator. */
@@ -499,7 +555,7 @@ export interface Settings {
   testTimeoutSec: number;
   /**
    * Run once in each new card worktree before its agent starts (and again when this text changes): install
-   * dependencies, copy `.env`. Empty skips. Environment: MH_REPO_PATH, MH_WORKTREE, MH_BRANCH, MH_BOARD.
+   * dependencies, copy `.env`. Empty skips. Environment: IH_REPO_PATH, IH_WORKTREE, IH_BRANCH, IH_BOARD.
    */
   worktreeSetup: string;
   worktreeSetupTimeoutSec: number;
@@ -532,6 +588,10 @@ export interface Settings {
    * sending them to an agent reviewer (Phase 6.1). A verdict given while this is off still counts.
    */
   humanReview: boolean;
+  /** When a goal's cards are all done, the orchestrator writes a final summary: what was done, how to verify it, open issues, reference documentation. */
+  finalSummary: boolean;
+  /** An agent's request to another swarm waits for a human to approve it before it is sent. Off (default): it is sent at once. */
+  peerRequestApproval: boolean;
   /** Best-of-N (master plan §5.4 step 9): run big cards on several agents at once and keep the best. Off by default. */
   bestOfN: { enabled: boolean; n: number; minComplexity: number };
   /** Tool grants cards can be given (Phase 6.5), by name. */
@@ -558,11 +618,11 @@ export const DEFAULT_SETTINGS: Settings = {
   maxCardsPerTurn: 20,
   shareToolchains: true,
   toolPaths: [],
-  directParallel: 1,
+  directParallel: 3,
   permissions: {
-    orchestrator: { canCreateCards: true, canAddDependencies: true, canSpawnAgents: false, canInstallMcp: false, canRequestGrants: true },
-    lead: { canCreateCards: true, canAddDependencies: true, canSpawnAgents: false, canInstallMcp: false, canRequestGrants: true },
-    worker: { canCreateCards: false, canAddDependencies: false, canSpawnAgents: false, canInstallMcp: false, canRequestGrants: true },
+    orchestrator: { canCreateCards: true, canAddDependencies: true, canSpawnAgents: false, canInstallMcp: false, canRequestGrants: true, canRequestPeers: true },
+    lead: { canCreateCards: true, canAddDependencies: true, canSpawnAgents: false, canInstallMcp: false, canRequestGrants: true, canRequestPeers: true },
+    worker: { canCreateCards: false, canAddDependencies: false, canSpawnAgents: false, canInstallMcp: false, canRequestGrants: true, canRequestPeers: true },
   },
   narrator: true,
   specLint: true,
@@ -579,6 +639,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxReviewRounds: 2,
   councilVerifyRounds: 2,
   priorOverrides: {},
+  agentWeights: {},
   learnFromOutcomes: true,
   kevOutcomeScoring: true,
   queryRewrite: true,
@@ -587,6 +648,8 @@ export const DEFAULT_SETTINGS: Settings = {
   notificationText: true,
   budgets: { board: null, agents: {} },
   humanReview: false,
+  finalSummary: true,
+  peerRequestApproval: false,
   bestOfN: { enabled: false, n: 2, minComplexity: 2 },
   grants: DEFAULT_GRANTS,
   autoApproveSpawn: false,
@@ -709,6 +772,8 @@ export interface Message {
   urgent: boolean;
   createdAt: string;
   deliveredAt: string | null;
+  /** When a human cleared it from "Messages for you"; it stays in the card's own activity. */
+  dismissedAt: string | null;
 }
 
 /** Normalized event emitted by every harness adapter. */
@@ -717,6 +782,10 @@ export type HarnessEvent =
   | { type: 'thought'; text: string }
   | { type: 'tool_call'; id: string; title: string; kind: string; status: string; locations: string[] }
   | { type: 'tool_update'; id: string; status: string; title?: string; locations?: string[] }
+  /** What a tool call printed (a command's output, a file write's result). Several can arrive for one call; they are appended. */
+  | { type: 'tool_output'; id: string; text: string; exitCode?: number }
+  /** Something the harness did on its own that the person should see, e.g. retrying after a provider error. */
+  | { type: 'notice'; text: string }
   | { type: 'plan'; entries: { content: string; status: string }[] }
   | { type: 'permission'; title: string; decision: 'allowed' | 'rejected'; reason: string }
   | { type: 'turn_end'; stopReason: string }
@@ -729,7 +798,7 @@ export type HarnessEvent =
  * install_mcp / install_skill: an agent proposes an MCP server or skill for the board · grant: a card asks for a tool
  * grant (a browser, say) · install_tool: a granted tool's command isn't on this machine; approving runs the grant's install command.
  */
-export type ApprovalKind = 'escalation' | 'spawn_agent' | 'install_mcp' | 'install_skill' | 'grant' | 'install_tool';
+export type ApprovalKind = 'escalation' | 'spawn_agent' | 'install_mcp' | 'install_skill' | 'grant' | 'install_tool' | 'peer_request';
 export type ApprovalStatus = 'pending' | 'approved' | 'denied';
 
 export interface Approval {
@@ -798,8 +867,15 @@ export type EventType =
   | 'session.ended'
   | 'message.posted'
   | 'message.delivered'
+  | 'message.dismissed'
+  | 'pool.ejected'
+  | 'pool.restored'
   | 'lease.acquired'
-  | 'lease.released';
+  | 'lease.released'
+  | 'peer.updated'
+  | 'request.updated'
+  | 'project.updated'
+  | 'board.removed';
 
 /** Ephemeral push to UI clients; not stored in the event log. */
 export interface LiveMessage {

@@ -5,14 +5,14 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { HarnessEvent } from '@mh/core';
+import type { HarnessEvent } from '@ih/core';
 import { AcpAgent, claudeSessionDirs, decidePermission, gitDirs, isolatedAgyHome, rootsFor, toolRoots, writableDirsFor } from '../src/index.ts';
 
 const fakeAgent = fileURLToPath(new URL('./fake-agent.mjs', import.meta.url));
 
-/** A fake home with a few toolchains, and a worktree outside it (like .meta-harness/worktrees). */
+/** A fake home with a few toolchains, and a worktree outside it (like .infinity-harness/worktrees). */
 function machine() {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'mh-env-')));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'ih-env-')));
   const home = join(base, 'home');
   for (const d of ['.platformio/penv/bin', '.local/bin', '.cargo/bin', '.cache/pip', '.ssh', 'Desktop/other-project', '.gemini/config']) mkdirSync(join(home, d), { recursive: true });
   writeFileSync(join(home, '.gitconfig'), '[user]\n  name = t\n');
@@ -61,23 +61,23 @@ test('the commands refused on 2026-11-04 are allowed with shared roots; private 
 });
 
 test('under a shared root that contains the worktree, the folder holding it stays refused', () => {
-  const cwd = '/tmp/mh-state/worktrees/b1/c1';
-  assert.deepEqual(rootsFor(cwd, ['/tmp', '/opt/sdk']), [{ root: '/tmp', except: '/tmp/mh-state' }, { root: '/opt/sdk' }]);
-  assert.equal(decidePermission({ locations: [{ path: '/tmp/mh-state/worktrees/b1/c2/a.ts' }] }, cwd, ['/tmp']).allow, false, 'a sibling worktree');
+  const cwd = '/tmp/ih-state/worktrees/b1/c1';
+  assert.deepEqual(rootsFor(cwd, ['/tmp', '/opt/sdk']), [{ root: '/tmp', except: '/tmp/ih-state' }, { root: '/opt/sdk' }]);
+  assert.equal(decidePermission({ locations: [{ path: '/tmp/ih-state/worktrees/b1/c2/a.ts' }] }, cwd, ['/tmp']).allow, false, 'a sibling worktree');
   assert.equal(decidePermission({ locations: [{ path: '/tmp/build/out.log' }] }, cwd, ['/tmp']).allow, true, 'other scratch space');
   assert.equal(decidePermission({ locations: [{ path: '/opt/sdk/include/x.h' }] }, cwd, ['/tmp', '/opt/sdk']).allow, true);
   assert.deepEqual(writableDirsFor(cwd, ['/tmp', '/opt/sdk', '/opt/sdk']), ['/opt/sdk'], 'Codex gets only roots outside the worktree');
 });
 
 test('gitDirs: a linked worktree names its own gitdir and the common dir; a plain checkout none', () => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'mh-git-')));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'ih-git-')));
   const repo = join(base, 'repo');
   mkdirSync(repo);
   const g = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
   g(repo, 'init', '-q', '-b', 'main');
   g(repo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
   const wt = join(base, 'wt');
-  g(repo, 'worktree', 'add', '-q', '-b', 'mh/x', wt);
+  g(repo, 'worktree', 'add', '-q', '-b', 'ih/x', wt);
   assert.deepEqual(gitDirs(wt), [join(repo, '.git', 'worktrees', 'wt'), join(repo, '.git')]);
   assert.deepEqual(gitDirs(repo), []);
   // With the git dirs shared, a commit's writes are allowed but the main checkout is not.

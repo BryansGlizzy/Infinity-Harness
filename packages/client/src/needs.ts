@@ -1,13 +1,13 @@
 // "Needs you": everything on a board that is waiting for a person. One definition for the CLI and the TUI (VS Code
 // and the web UI show the same things in their own layouts).
-import type { Approval, ApprovalKind, Card, Message, Outcome } from '@mh/core';
+import type { Approval, ApprovalKind, Card, FedRequest, Message, Outcome, Peer } from '@ih/core';
 import type { DaemonApi } from './api.ts';
 
-export type NeedKind = 'approval' | 'review' | 'blocked' | 'outcome' | 'message';
+export type NeedKind = 'approval' | 'review' | 'blocked' | 'outcome' | 'message' | 'peer' | 'peer_request' | 'peer_reply';
 
 export interface Need {
   kind: NeedKind;
-  /** Approval id, card id, outcome id or message id (what `id` means depends on `kind`). */
+  /** Approval id, card id, outcome id, message id, peer id or request id (what `id` means depends on `kind`). */
   id: string;
   cardId: string | null;
   /** The one line a person reads. */
@@ -25,6 +25,11 @@ export interface NeedsInput {
   outcomes: Outcome[];
   /** Settings → Tools & review → "Hold cards in Review for me". */
   humanReview: boolean;
+  /** Swarms that knocked and wait for a decision, and requests from peers waiting for approval (Phase 7). */
+  knocks?: Peer[];
+  peerRequests?: FedRequest[];
+  /** Requests we sent that wait for us: a question to answer, or a landed result to confirm or send back. */
+  replies?: FedRequest[];
 }
 
 const cardTitle = (cards: Card[], id: string | null) => cards.find((c) => c.id === id)?.title ?? id ?? '';
@@ -59,19 +64,44 @@ export function needsFrom(input: NeedsInput): Need[] {
     at: o.createdAt,
   }));
   const messages: Need[] = input.messages
-    .filter((m) => m.toCard === null && !m.fromActor.startsWith('user:'))
+    .filter((m) => m.toCard === null && !m.fromActor.startsWith('user:') && !m.dismissedAt)
     .map((m) => ({ kind: 'message', id: m.id, cardId: m.fromActor.startsWith('card:') ? m.fromActor.slice(5) : null, title: m.body.split('\n')[0]!.slice(0, 200), detail: m.fromActor, at: m.createdAt }));
-  return [approvals, review, blocked, outcomes, messages].flatMap((list) => list.sort(newest));
+  const knocks: Need[] = (input.knocks ?? []).map((p) => ({
+    kind: 'peer',
+    id: p.id,
+    cardId: null,
+    title: `Swarm "${p.knock?.name ?? p.name ?? p.label}" wants to connect`,
+    detail: `fingerprint ${p.fingerprint ?? '?'}${p.knock ? ` · offers ${p.knock.projects.length} project${p.knock.projects.length === 1 ? '' : 's'}` : ''}`,
+    at: p.knock?.at ?? p.createdAt,
+  }));
+  const requests: Need[] = (input.peerRequests ?? []).map((r) => ({
+    kind: 'peer_request',
+    id: r.id,
+    cardId: null,
+    title: `Request from ${r.peerName ?? 'a peer'}: ${r.title}`,
+    detail: r.blocking ? 'the sender is waiting for this' : 'from another swarm',
+    at: r.createdAt,
+  }));
+  const replies: Need[] = (input.replies ?? []).map((r) => ({
+    kind: 'peer_reply',
+    id: r.id,
+    cardId: r.cardId,
+    title: r.status === 'needs_info' ? `${r.peerName ?? 'A peer'} asks about "${r.title}"` : `Check what ${r.peerName ?? 'a peer'} landed: ${r.title}`,
+    detail: r.status === 'needs_info' ? ([...r.thread].reverse().find((e) => e.side === 'receiver')?.text ?? '') : (r.resolution?.ref ?? r.resolution?.note ?? ''),
+    at: r.updatedAt,
+  }));
+  return [approvals, knocks, requests, replies, review, blocked, outcomes, messages].flatMap((list) => list.sort(newest));
 }
 
 /** Loads what `needsFrom` needs. Parts a daemon cannot supply count as empty. */
 export async function loadNeeds(api: DaemonApi, boardId: string): Promise<Need[]> {
-  const [approvals, cards, messages, outcomes, settings] = await Promise.all([
+  const [approvals, cards, messages, outcomes, settings, peers] = await Promise.all([
     api.approvals(boardId).catch(() => []),
     api.cards(boardId),
     api.messages(boardId).catch(() => []),
     api.pendingOutcomes(boardId).catch(() => []),
     api.settings(boardId).catch(() => null),
+    api.federationNeeds().catch(() => null),
   ]);
-  return needsFrom({ approvals, cards, messages, outcomes, humanReview: settings?.humanReview ?? false });
+  return needsFrom({ approvals, cards, messages, outcomes, humanReview: settings?.humanReview ?? false, knocks: peers?.knocks, peerRequests: peers?.requests, replies: peers?.replies });
 }

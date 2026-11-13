@@ -1,6 +1,6 @@
-import { DaemonApi, DaemonHttp } from '@mh/client';
-import { MachineCatalog, MachineConnection, defaultCatalogFile, parseScoped, LOCAL } from '@mh/client/node';
-import type { Board, Card } from '@mh/core';
+import { DaemonApi, DaemonHttp } from '@ih/client';
+import { MachineCatalog, MachineConnection, defaultCatalogFile, parseScoped, LOCAL } from '@ih/client/node';
+import type { Board, Card } from '@ih/core';
 import { UsageError, type Io } from './io.ts';
 
 export interface Flags {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, outcomeValue, type Classification, type Pool } from '@mh/core';
+import { DEFAULT_SETTINGS, outcomeValue, type Classification, type Pool } from '@ih/core';
 import { KevClient, fallbackClassification, historyKey, priorFor, priorSuccess, rankPools, type PoolView } from '../src/index.ts';
 
 const pool = (id: string, kind: Pool['kind'] = 'subscription'): Pool => ({ id, label: id, harness: 'opencode', model: `${id}/m`, kind });
@@ -246,4 +246,32 @@ test('rankPools: a card that needs the network skips Codex (its shell has none);
   assert.equal(by.kimi!.eligible, false);
   assert.match(by.kimi!.reasons.join(), /budget used up \(97%\)/);
   assert.match(by.agy!.reasons.join(), /budget warn/);
+});
+
+test('agent weights: the operator can tilt routing; a boost does not send hard cards to a light agent; 0 switches an agent off', () => {
+  const team = [modelView('agy', 'gemini-4-argon', 'argon'), modelView('nim', 'nvidia/nemotron-3.5-super-vl-120b-a12b', 'nemotron')];
+  const top = (c: Classification, agentWeights: Record<string, number>) => rankPools({ classification: c, routing: null, pools: team, settings: { ...flat, agentWeights } });
+  assert.equal(top(typed('feature', 1), {})[0]!.agentId, 'argon', 'without a weight the stronger prior wins');
+  const tilted = top(typed('feature', 1), { nemotron: 2 });
+  assert.equal(tilted[0]!.agentId, 'nemotron');
+  assert.match(tilted[0]!.reasons.join(), /weight ×2/);
+  assert.equal(top(typed('feature', 1), { argon: 0.5 })[0]!.agentId, 'nemotron', 'a weight under 1 holds an agent back');
+  // Nemotron handles up to complexity 2.5: a hard card ignores its boost.
+  const hard = top(typed('feature', 4), { nemotron: 5 });
+  assert.equal(hard[0]!.agentId, 'argon');
+  assert.match(hard.find((c) => c.agentId === 'nemotron')!.reasons.join(), /not applied/);
+  const off = top(typed('feature', 1), { argon: 0 });
+  assert.equal(off.find((c) => c.agentId === 'argon')!.eligible, false);
+  assert.match(off.find((c) => c.agentId === 'argon')!.reasons.join(), /weight 0/);
+});
+
+test('an offline pool is out of rotation with the reason shown, and the others are unaffected', () => {
+  const team = [modelView('agy', 'gemini-4-argon', 'argon'), modelView('nim', 'nvidia/nemotron-3.5-super-vl-120b-a12b', 'nemotron')];
+  const down = [team[0]!, { ...team[1]!, offline: 'fetch failed (ECONNREFUSED)' }];
+  const ranked = rankPools({ classification: typed('feature', 1), routing: null, pools: down, settings: flat });
+  const nemotron = ranked.find((c) => c.agentId === 'nemotron')!;
+  assert.equal(nemotron.eligible, false);
+  assert.match(nemotron.reasons.join(), /offline: fetch failed \(ECONNREFUSED\) \(turn it back on in Agents\)/);
+  assert.equal(ranked[0]!.agentId, 'argon');
+  assert.equal(rankPools({ classification: typed('feature', 1), routing: null, pools: team, settings: flat }).every((c) => c.eligible), true, 'back in rotation once the reason is gone');
 });

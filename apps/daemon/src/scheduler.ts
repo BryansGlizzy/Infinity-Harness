@@ -1,8 +1,8 @@
-import { effectiveAgents, type AgentProfile, type Card, type DaemonEvent, type HarnessEvent, type Pool, type Settings } from '@mh/core';
-import type { Store } from '@mh/db';
-import type { RateLimiter } from '@mh/gateway';
-import { cleanNarration, narratorJob, readLint, specLintJob, type FastLane } from '@mh/fast-lane';
-import { fallbackClassification, historyKey, rankPools, type Candidate, type KevClient, type PoolView } from '@mh/router';
+import { effectiveAgents, type AgentProfile, type Card, type DaemonEvent, type HarnessEvent, type Pool, type Settings } from '@ih/core';
+import type { Store } from '@ih/db';
+import type { RateLimiter } from '@ih/gateway';
+import { cleanNarration, narratorJob, readLint, specLintJob, type FastLane } from '@ih/fast-lane';
+import { fallbackClassification, historyKey, rankPools, type Candidate, type KevClient, type PoolView } from '@ih/router';
 import type { Runner } from './runner.ts';
 import type { Budgets } from './budgets.ts';
 import type { Approvals } from './approvals.ts';
@@ -59,6 +59,10 @@ export interface SchedulerDeps {
   approvals?: Approvals | null;
   /** Best-of-N (Phase 6.5): given a ready worker card first; returns true when it took the card over. */
   bestOf?: { intercept(card: Card): boolean; siblingAgents(card: Card): string[] } | null;
+  /** Why a ready card must not start now (it waits for another swarm, or a request's budget is used up), or null. */
+  hold?: (card: Card) => string | null;
+  /** Pools taken out of rotation because their endpoint stopped answering. */
+  health?: { ejection(poolId: string): { since: string; reason: string } | null } | null;
   tickMs?: number;
 }
 
@@ -157,6 +161,7 @@ export class Scheduler {
         topPct: Math.max(0, ...status.windows.map((w) => w.pct)),
         fiveHourPct: status.windows.find((w) => w.window === '5h')?.pct,
         running: this.deps.runner.runningOn(pool.id) + launching,
+        offline: this.deps.health?.ejection(pool.id)?.reason ?? null,
       };
     });
   }
@@ -288,6 +293,8 @@ export class Scheduler {
           continue;
         }
         if (runner.isActive(card.id) || this.launching.has(card.id)) continue;
+        // Waiting for another swarm's answer, or for a request's budget to be raised (federation, Phase 7).
+        if (this.deps.hold?.(card)) continue;
         if (store.blockers(card.id).some((b) => !this.settled(byId.get(b.id) ?? b, cards))) continue;
         if (!card.classification) {
           void this.classify(card.id);
@@ -365,7 +372,7 @@ export class Scheduler {
    */
   orchestratorAgent(settings: Settings, boardId?: string): { poolId: string; model?: string; agentId?: string } {
     const views = this.agentViews(settings, boardId);
-    const usable = (v: PoolView) => v.state !== 'halted' && v.state !== 'locked' && v.budget?.state !== 'halted';
+    const usable = (v: PoolView) => v.state !== 'halted' && v.state !== 'locked' && v.budget?.state !== 'halted' && !v.offline;
     const pick = (v: PoolView & { agent?: AgentProfile }) => ({ poolId: v.pool.id, model: v.agent?.model || undefined, agentId: v.agent?.id });
     for (const role of ['orchestrator', 'lead'] as const) {
       const found = views.find((v) => v.agent?.role === role && usable(v));
@@ -388,6 +395,17 @@ export class Scheduler {
     const card = store.createCard({ boardId, title: goal, description, role: 'orchestrator', status: 'ready' });
     const { poolId, model, agentId } = this.orchestratorAgent(settings, boardId);
     await runner.run(card.id, poolId, { model, agentId });
+    return store.getCard(card.id)!;
+  }
+
+  /** A one-off job for the orchestrator agent with its own prompt (not a goal to split into cards), e.g. writing a project card. */
+  async startTask(boardId: string, title: string, description: string, prompt: string): Promise<Card> {
+    const { store, runner } = this.deps;
+    const settings = store.getSettings(boardId);
+    if (this.deps.budgets?.boardHalted(boardId)) throw new Error("this board's budget is used up (Settings → Budgets)");
+    const card = store.createCard({ boardId, title, description, role: 'orchestrator', status: 'ready' });
+    const { poolId, model, agentId } = this.orchestratorAgent(settings, boardId);
+    await runner.run(card.id, poolId, { model, agentId, prompt });
     return store.getCard(card.id)!;
   }
 

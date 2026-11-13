@@ -6,6 +6,7 @@
 //   SLOW    → waits up to 5 s; session/cancel ends the turn as cancelled
 //   CALL <tool> <json>  (one per line) → calls that tool on the session's "board" MCP server
 //   CALL[<model>] … / FAIL[<model>] → only when the session runs that model
+//   FAILMSG(<text>)  → the message of a scripted failure (default `scripted failure`)
 //   WHEN(<text>) CALL … → only when the prompt contains <text>
 //   SHELL <command>  (one per line) → asks permission to run it as a shell command; replies shell=<optionId>
 //   DIRS             → replies dirs=<JSON of the session's additionalDirectories>
@@ -80,7 +81,8 @@ async function handle(msg) {
       const text = params.prompt.map((p) => p.text).join('');
       const failFor = /FAIL\[([^\]]+)\]/.exec(text);
       const late = failFor && failFor[1] === s.model;
-      if (failFor ? false : text.includes('FAIL')) return send({ jsonrpc: '2.0', id, error: { code: -32603, message: 'scripted failure' } });
+      const failMessage = /FAILMSG\(([^)]*)\)/.exec(text)?.[1] ?? 'scripted failure';
+      if (failFor ? false : text.includes('FAIL')) return send({ jsonrpc: '2.0', id, error: { code: -32603, message: failMessage } });
       s.cancelled = false;
       update(params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `${s.loaded ? 'loaded ' : ''}prompt:${text.slice(0, 200)}\n` } });
       if (s.thinking) update(params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `thinking=${s.thinking}\n` } });
@@ -103,7 +105,7 @@ async function handle(msg) {
         update(params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `${call[3]} -> ${result}\n` } });
       }
       // A model-specific failure happens after its board calls, so it can leave notes behind first.
-      if (late) return send({ jsonrpc: '2.0', id, error: { code: -32603, message: 'scripted failure' } });
+      if (late) return send({ jsonrpc: '2.0', id, error: { code: -32603, message: failMessage } });
       if (text.includes('SLOW')) {
         for (let i = 0; i < 100 && !s.cancelled; i++) await new Promise((r) => setTimeout(r, 50));
         if (s.cancelled) return send({ jsonrpc: '2.0', id, result: { stopReason: 'cancelled' } });

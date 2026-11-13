@@ -20,12 +20,13 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import type { AgentProfile, Card, Dependency, Message } from '@mh/core';
+import type { AgentProfile, Card, Dependency, Message } from '@ih/core';
 import type { ActiveSession, PoolWithStatus } from './api.ts';
 import { STATUS_LABEL } from './BoardView.tsx';
 import { ROLE_LABEL, agentHue, cardAgent, type CardAgent } from './agentInfo.ts';
 import { complexityLabel } from './labels.ts';
 import { remember, saved } from './storage.ts';
+import { NodeActivity } from './NodeActivity.tsx';
 
 const W = 264;
 /** Nodes have a fixed height so the layout never overlaps them. */
@@ -45,6 +46,11 @@ type CardNodeData = {
   collapsed: boolean;
   colorBy: ColorBy;
   onToggle: (id: string) => void;
+  /** The live activity box under the node. */
+  activityOpen: boolean;
+  onToggleActivity: (id: string) => void;
+  onOpenCard: (id: string) => void;
+  titleOf: (id: string) => string;
 };
 type CardNode = Node<CardNodeData, 'card'>;
 
@@ -55,6 +61,7 @@ function CardNodeView({ data }: NodeProps<CardNode>) {
   const hueKey = agent?.agentId ?? agent?.poolId;
   const style = colorBy === 'agent' && hueKey ? ({ '--node-hue': agentHue(hueKey) } as React.CSSProperties) : undefined;
   return (
+    <>
     <div className={`tnode status-${card.status} ${card.role} ${selected ? 'selected' : ''} ${talking ? 'talking' : ''} color-${colorBy}`} style={style}>
       <Handle type="target" position={Position.Top} id="t" />
       <Handle type="target" position={Position.Left} id="l" className="side-handle" />
@@ -65,6 +72,17 @@ function CardNodeView({ data }: NodeProps<CardNode>) {
         {council && <span className="badge council">council · {council.phase}</span>}
         <span className="spacer" />
         {running && <span className="pulse" aria-label="running" />}
+        <button
+          className={`tnode-arrow nodrag ${data.activityOpen ? 'open' : ''}`}
+          aria-expanded={data.activityOpen}
+          title={data.activityOpen ? 'Hide the live activity' : 'Show the live activity here'}
+          onClick={(e) => {
+            e.stopPropagation();
+            data.onToggleActivity(card.id);
+          }}
+        >
+          ▾
+        </button>
       </div>
       <div className="tnode-title" title={card.title}>{card.title}</div>
       {agent ? (
@@ -102,6 +120,9 @@ function CardNodeView({ data }: NodeProps<CardNode>) {
       )}
       <Handle type="source" position={Position.Bottom} id="b" />
     </div>
+      {/* Beside the card, not inside it: the card clips its own overflow. */}
+      {data.activityOpen && <NodeActivity cardId={card.id} titleOf={data.titleOf} onOpen={() => data.onOpenCard(card.id)} />}
+    </>
   );
 }
 
@@ -164,6 +185,15 @@ function loadPositions(boardId: string): Positions {
   }
 }
 
+const openKey = (boardId: string) => `ih.tree.activity.open.${boardId}`;
+function loadOpen(boardId: string): Set<string> {
+  try {
+    return new Set(JSON.parse(saved(openKey(boardId)) ?? '[]') as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
 interface TreeProps {
   boardId: string;
   cards: Card[];
@@ -186,10 +216,25 @@ function Tree(props: TreeProps) {
   /** Subtrees the user opened (with folding on) or closed (with it off). */
   const [toggled, setToggled] = useState<Set<string>>(new Set());
   const [legendOpen, setLegendOpen] = useState(true);
+  /** Cards whose live activity box is open, remembered per board. */
+  const [activityOpen, setActivityOpen] = useState<Set<string>>(() => loadOpen(boardId));
+  const onToggleActivity = useCallback(
+    (id: string) =>
+      setActivityOpen((s) => {
+        const next = new Set(s);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        remember(openKey(boardId), JSON.stringify([...next]));
+        return next;
+      }),
+    [boardId],
+  );
+  const titleOf = useCallback((id: string) => cards.find((c) => c.id === id)?.title ?? id, [cards]);
 
   useEffect(() => {
     setMoved(loadPositions(boardId));
     setToggled(new Set());
+    setActivityOpen(loadOpen(boardId));
   }, [boardId]);
 
   const onToggle = useCallback((id: string) => {
@@ -251,6 +296,8 @@ function Tree(props: TreeProps) {
           id: card.id,
           type: 'card',
           position: moved[card.id] ?? tree.pos.get(card.id) ?? { x: 0, y: 0 },
+          // An open activity box hangs below its node and overlaps what is under it, so it sits on top.
+          ...(activityOpen.has(card.id) ? { zIndex: 1000 } : {}),
           data: {
             card,
             agent: cardAgent(card, props.agents, props.pools, props.sessions),
@@ -261,13 +308,29 @@ function Tree(props: TreeProps) {
             collapsed: !tree.hiddenCount.has(card.id) && children.length > 0 && tree.isDone(card),
             colorBy,
             onToggle,
+            activityOpen: activityOpen.has(card.id),
+            onToggleActivity,
+            onOpenCard: props.onSelect,
+            titleOf,
           },
         };
       }),
-    [tree, moved, selected, talking, colorBy, onToggle, props.agents, props.pools, props.sessions],
+    [tree, moved, selected, talking, colorBy, onToggle, activityOpen, onToggleActivity, titleOf, props.onSelect, props.agents, props.pools, props.sessions],
   );
   const [nodes, setNodes] = useState<CardNode[]>(baseNodes);
-  useEffect(() => setNodes(baseNodes), [baseNodes]);
+  // New data replaces the nodes, but each keeps the size React Flow measured for it and a position being dragged.
+  // Fresh nodes without a size are hidden until re-measured, so the whole tree flickered on every update (and could
+  // stay blank while updates kept coming).
+  useEffect(() => {
+    setNodes((prev) => {
+      const old = new Map(prev.map((n) => [n.id, n]));
+      return baseNodes.map((n) => {
+        const was = old.get(n.id);
+        if (!was) return n;
+        return { ...n, ...(was.measured ? { measured: was.measured } : {}), ...(was.dragging ? { position: was.position, dragging: true } : {}) };
+      });
+    });
+  }, [baseNodes]);
   const onNodesChange = useCallback((changes: NodeChange<CardNode>[]) => setNodes((ns) => applyNodeChanges(changes, ns)), []);
 
   const edges = useMemo<Edge[]>(() => {

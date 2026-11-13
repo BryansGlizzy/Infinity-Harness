@@ -1,10 +1,10 @@
 {
-  "name": "@mh/router",
+  "name": "@ih/router",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
-    "@mh/core": "workspace:*"
+    "@ih/core": "workspace:*"
   }
 }

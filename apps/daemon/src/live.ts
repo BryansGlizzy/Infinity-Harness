@@ -1,4 +1,4 @@
-import type { LiveMessage } from '@mh/core';
+import type { LiveMessage } from '@ih/core';
 
 /** Ephemeral updates (pool gauges, lease changes) pushed to UI clients but not written to the event log. */
 export class Live {

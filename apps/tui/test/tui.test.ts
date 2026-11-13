@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Fleet, MachineCatalog } from '@mh/client/node';
+import { Fleet, MachineCatalog } from '@ih/client/node';
 import { setup, status, waitFor } from '../../daemon/test/harness.ts';
 import { fakeSsh } from '../../../packages/client/test/fake-ssh.ts';
 import { App } from '../src/app.ts';
@@ -162,7 +162,7 @@ async function done(t: Awaited<ReturnType<typeof setup>>) {
 
 async function launch(t: Awaited<ReturnType<typeof setup>>, extra: Partial<ConstructorParameters<typeof App>[0]> = {}) {
   const term = new FakeTerm();
-  const cat = new MachineCatalog(join(mkdtempSync(join(tmpdir(), 'mh-tui-')), 'machines.json'));
+  const cat = new MachineCatalog(join(mkdtempSync(join(tmpdir(), 'ih-tui-')), 'machines.json'));
   const fleet = new Fleet({ catalog: cat, localUrl: `http://127.0.0.1:${t.cfg.port}`, connection: { readyTimeoutMs: 1500, checkIntervalMs: 100, checkTimeoutMs: 200, backoff: { minMs: 20, maxMs: 60, healthyMs: 100_000 } } });
   const app = new App({ fleet, term, seenAfterMs: 40, bell: false, ...extra });
   running.push(app);
@@ -328,13 +328,65 @@ test('pools: windows and budgets', async () => {
   }
 });
 
+test('messages for you can be cleared from the TUI, one or all, and stay in the card\'s log', async () => {
+  const t = await setup();
+  try {
+    const card = t.store.createCard({ boardId: t.board.id, title: 'Chatty card' });
+    const say = (body: string) => t.store.postMessage({ boardId: t.board.id, fromActor: `card:${card.id}`, toCard: null, body, urgent: false });
+    const [a, b, c] = [say('first question'), say('second question'), say('third question')];
+    const { app } = await launch(t);
+    await until(() => /3 waiting|Needs you \(3\)/.test(app.text()));
+    assert.match(app.text(), /Clear x/);
+    assert.match(app.text(), /Clear all messages X/);
+    const shown = () => ['first', 'second', 'third'].filter((w) => app.text().includes(`${w} question`));
+    const selected = t.store.boardMessages(t.board.id).find((m) => app.text().includes(m.body.split('\n')[0]!))!;
+    assert.ok(selected);
+    await app.handle(key('x'));
+    await until(() => t.store.boardMessages(t.board.id).filter((m) => m.dismissedAt).length === 1);
+    await until(() => shown().length === 2, 3000);
+    await app.handle(key('X'));
+    await until(() => [a, b, c].every((m) => t.store.boardMessages(t.board.id).find((x) => x.id === m.id)!.dismissedAt));
+    await until(() => shown().length === 0, 3000);
+    assert.equal(t.store.boardMessages(t.board.id).length, 3, 'nothing was deleted');
+    app.stop();
+  } finally {
+    await done(t);
+  }
+});
+
+test('pools: a pool taken out of rotation shows why, can be tested and put back', async () => {
+  const t = await setup();
+  try {
+    t.health.eject('fa', 'no answer within 8 s');
+    const { app } = await launch(t);
+    await app.handle(key('3'));
+    await until(() => /OUT/.test(app.text()));
+    assert.match(app.text(), /fa\s+OUT\s+.*out of rotation/);
+    assert.match(app.text(), /Out since .*no answer within 8 s\. Not held against the model\./);
+    assert.match(app.text(), /Put back in rotation b/);
+
+    await app.handle(key('t'));
+    await until(() => /Fake A: online/.test(app.text()), 3000);
+    assert.ok(t.health.ejection('fa'), 'a passing test does not put it back');
+
+    await app.handle(key('b'));
+    await until(() => !t.health.ejection('fa'), 3000);
+    await until(() => !/OUT/.test(app.text()), 3000);
+    assert.match(app.text(), /fa\s+open\s+.*online/);
+    assert.doesNotMatch(app.text(), /Put back in rotation/);
+    app.stop();
+  } finally {
+    await done(t);
+  }
+});
+
 test('seen is per device: items count as new until looked at, and another device starts fresh', async () => {
   const t = await setup();
   try {
     const card = t.store.createCard({ boardId: t.board.id, title: 'Look at me' });
     t.store.createApproval({ boardId: t.board.id, cardId: card.id, kind: 'grant', summary: 'First request', payload: { grant: 'browser' }, requestedBy: 'x' });
     t.store.createApproval({ boardId: t.board.id, cardId: card.id, kind: 'grant', summary: 'Second request', payload: { grant: 'computer' }, requestedBy: 'x' });
-    const dir = mkdtempSync(join(tmpdir(), 'mh-seen-'));
+    const dir = mkdtempSync(join(tmpdir(), 'ih-seen-'));
     const phone = join(dir, 'phone.json');
     const desk = join(dir, 'desk.json');
 
@@ -391,7 +443,7 @@ test('another machine: switch from the header, see its data; when it drops the l
   try {
     const card = t.store.createCard({ boardId: t.board.id, title: 'Over there' });
     t.store.createApproval({ boardId: t.board.id, cardId: card.id, kind: 'grant', summary: 'A request on the far machine', payload: { grant: 'browser' }, requestedBy: 'x' });
-    const cat = new MachineCatalog(join(mkdtempSync(join(tmpdir(), 'mh-tui-')), 'machines.json'));
+    const cat = new MachineCatalog(join(mkdtempSync(join(tmpdir(), 'ih-tui-')), 'machines.json'));
     cat.add({ label: 'workbox', target: 'me@workbox' });
     const term = new FakeTerm();
     const fleet = new Fleet({ catalog: cat, localUrl: 'http://127.0.0.1:9', connection: { spawn, readyTimeoutMs: 1000, checkIntervalMs: 80, checkTimeoutMs: 150, backoff: { minMs: 20, maxMs: 60, healthyMs: 100_000 } } });
@@ -418,6 +470,161 @@ test('another machine: switch from the header, see its data; when it drops the l
     // It comes back by itself and the buttons return.
     down = false;
     await until(() => /Approve a/.test(app.text()) && !/last known state/.test(app.text()), 6000);
+    app.stop();
+  } finally {
+    await done(t);
+  }
+});
+
+test('another swarm knocks and sends a request: both are in Needs you; accepting asks once, declining needs a reason', async () => {
+  const t = await setup({ federation: true });
+  const fed = t.federation!;
+  try {
+    const { generateIdentity } = await import('../../daemon/src/federation/identity.ts');
+    const stranger = generateIdentity();
+    fed.handleHello({ swarmId: stranger.swarmId, publicKey: stranger.publicKey }, { name: 'Gamma', projects: [] });
+    const { app } = await launch(t);
+    assert.match(app.text(), /swarm\s+Swarm "Gamma" wants to connect/);
+    assert.match(app.text(), new RegExp(stranger.fingerprint.slice(0, 9)), 'the fingerprint is on screen to compare');
+
+    // Accepting is not one keystroke: it asks, and Cancel leaves it waiting.
+    await app.handle(key('a'));
+    assert.match(app.text(), /Compare this fingerprint/);
+    await app.handle(key('esc'));
+    assert.equal(fed.listPeers()[0]!.trust, 'pending');
+    await app.handle(key('a'));
+    await app.handle(key('up'));
+    await app.handle(key('enter'));
+    await until(() => fed.listPeers()[0]!.trust === 'verified');
+
+    // Its request: the sender is waiting; Decline wants a reason.
+    fed.saveDraft(t.board.id, { name: 'Demo', oneLine: 'Demo', provides: ['demo'], accepts: { requests: true, note: '' } }, 'manual');
+    fed.publish(t.board.id, 'basic');
+    const peer = t.store.fed.listPeers()[0]!;
+    fed.receiveRequest(peer, { id: 'req00001', title: 'Crash on empty input', description: 'x', project: t.board.id, blocking: false, acceptance: [], milestones: [], budget: null, origin: { cardId: null, hops: [peer.swarmId!] } });
+    await until(() => /request\s+Request from Gamma: Crash on empty input/.test(app.text()));
+    await app.handle(key('d'));
+    await type(app, 'not now');
+    await app.handle(key('enter'));
+    await until(() => fed.listRequests({ direction: 'in' })[0]!.status === 'declined');
+    assert.equal(fed.listRequests({ direction: 'in' })[0]!.thread.at(-1)?.text, 'not now');
+    app.stop();
+  } finally {
+    await done(t);
+  }
+});
+
+test('a question from a swarm we asked, and a result it landed, are in Needs you with their own actions', async () => {
+  const t = await setup({ federation: true });
+  try {
+    const peer = t.store.fed.createPeer({ label: 'beta', trust: 'verified', swarmId: 'sw_beta', name: 'Beta', publicKey: 'k', fingerprint: 'f', address: { kind: 'url', url: 'http://127.0.0.1:1' } });
+    const mk = (title: string, status: 'needs_info' | 'landed', extra: object = {}) =>
+      t.store.fed.updateRequest(
+        t.store.fed.createRequest({ direction: 'out', peerId: peer.id, remoteId: `r_${title}`, title, description: 'x', status: 'pending', origin: { swarmId: 'me', cardId: null, hops: ['me'] }, boardId: t.board.id }).id,
+        { status, ...extra },
+      );
+    mk('Which node version', 'needs_info', { thread: [{ side: 'receiver', at: new Date().toISOString(), text: 'Which node version do you run?' }] });
+    mk('Parser fix', 'landed', { resolution: { ref: 'abc1234' } });
+    const { app } = await launch(t);
+    assert.match(app.text(), /reply\s+Beta asks about "Which node version"/);
+    assert.match(app.text(), /reply\s+Check what Beta landed: Parser fix/);
+    // The question offers Answer; the landed result offers "It works" and "Send back".
+    await select(app, 'asks about');
+    assert.match(app.text(), /Answer/);
+    await app.handle(key('a'));
+    assert.match(app.text(), /Your answer/);
+    await app.handle(key('esc'));
+    await select(app, 'Check what Beta landed');
+    assert.match(app.text(), /It works/);
+    assert.match(app.text(), /Send back/);
+    app.stop();
+  } finally {
+    await done(t);
+  }
+});
+
+test('removing a board from the board menu: forget keeps the folder; delete asks for the name typed back', async () => {
+  const t = await setup();
+  try {
+    const { existsSync } = await import('node:fs');
+    const { tempRepo } = await import('../../daemon/test/harness.ts');
+    const doomed = t.store.createBoard({ name: 'Doomed', repoPath: await tempRepo(), defaultBranch: 'main' });
+    const { app } = await launch(t);
+    const open = async () => {
+      await clickOn(app, '▾'); // the machine switcher comes first; the board name is the second ▾
+    };
+    void open;
+    // Choose the Doomed board, then open the board menu again and pick "Remove this board…".
+    app['wantBoard'] = doomed.id;
+    await app.refresh();
+    await until(() => app.state.snap.board?.id === doomed.id);
+    app['openBoardMenu']();
+    assert.match(app.text(), /Remove this board…/);
+    await app.handle(key('down'));
+    await app.handle(key('down'));
+    await app.handle(key('enter'));
+    await until(() => /Remove "Doomed"\?/.test(app.text()));
+    assert.match(app.text(), /Delete on system…/);
+    // The menu opens on Cancel. Delete on system: a typed confirmation that must match; a wrong one deletes nothing.
+    await app.handle(key('up'));
+    await app.handle(key('enter'));
+    await until(() => /Type the board's name: Doomed/.test(app.text()));
+    await type(app, 'doomed');
+    await app.handle(key('enter'));
+    assert.ok(existsSync(doomed.repoPath), 'a wrong name deletes nothing');
+    assert.ok(t.store.getBoard(doomed.id));
+    // Forget: the board goes, the folder stays.
+    app['removeBoardFlow']();
+    await until(() => /Remove "Doomed"\?/.test(app.text()));
+    await app.handle(key('1'));
+    await until(() => !t.store.getBoard(doomed.id));
+    assert.ok(existsSync(doomed.repoPath));
+    app.stop();
+  } finally {
+    await done(t);
+  }
+});
+
+test('files: the project tree opens folders in place, marks what changed, and reads a file', async () => {
+  const t = await setup();
+  try {
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    mkdirSync(join(t.repo, 'src', 'deep'), { recursive: true });
+    writeFileSync(join(t.repo, 'src', 'main.ts'), 'export const answer = 42;\nconsole.log(answer);\n');
+    writeFileSync(join(t.repo, 'src', 'deep', 'inner.txt'), 'inner\n');
+    writeFileSync(join(t.repo, 'README.md'), '# changed\n');
+    const { app } = await launch(t);
+    await app.handle(key('4'));
+    await until(() => /src\//.test(app.text()));
+    // Folders first, then files; a changed file is marked, and so is the folder holding new files.
+    const lines = app.canvas!.lines();
+    const at = (re: RegExp) => lines.findIndex((l) => re.test(l));
+    assert.ok(at(/▸ src\//) < at(/README\.md/), 'folders come first');
+    assert.match(lines[at(/README\.md/)]!, /M\s*$/, 'a modified file is marked M');
+    assert.match(lines[at(/▸ src\//)]!, /•\s*$/, 'a folder with changes inside is marked');
+
+    // Enter opens the selected folder in place; → goes in; the children are indented.
+    await app.handle(key('enter'));
+    await until(() => /▾ src\//.test(app.text()) && /main\.ts/.test(app.text()));
+    await app.handle(key('down'));
+    assert.match(app.text(), /\s{2}▸ deep\//);
+    await app.handle(key('right'));
+    await until(() => /inner\.txt/.test(app.text()));
+    // ← closes it again; ← on a closed folder goes up to its parent.
+    await app.handle(key('left'));
+    await until(() => !/inner\.txt/.test(app.text()));
+    await app.handle(key('left'));
+    assert.equal(app.state.sel.files, 0, 'back on src/');
+
+    // A file opens in a reader, scrolls, and closes.
+    await app.handle(key('down'));
+    await app.handle(key('down'));
+    await app.handle(key('enter'));
+    await until(() => /export const answer = 42;/.test(app.text()));
+    assert.match(app.text(), /src\/main\.ts/);
+    assert.match(app.text(), /2 lines/);
+    await app.handle(key('esc'));
+    assert.equal(app.state.modal, null);
     app.stop();
   } finally {
     await done(t);

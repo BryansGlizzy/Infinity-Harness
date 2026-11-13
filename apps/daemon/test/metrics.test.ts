@@ -2,10 +2,10 @@
 // pool usage history.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '@mh/db';
-import { RateLimiter } from '@mh/gateway';
-import { claudeTelemetryEnv, usageFrom } from '@mh/adapters';
-import { DEFAULT_SETTINGS } from '@mh/core';
+import { Store } from '@ih/db';
+import { RateLimiter } from '@ih/gateway';
+import { claudeTelemetryEnv, usageFrom } from '@ih/adapters';
+import { DEFAULT_SETTINGS } from '@ih/core';
 import { Budgets, budgetScopeId, describeBudget, periodStart } from '../src/budgets.ts';
 import { PoolHistory, outages } from '../src/history.ts';
 import { buildMetrics } from '../src/metrics.ts';
@@ -26,7 +26,7 @@ const point = (value: number, attrs: Record<string, string>): { asInt?: string; 
 const otlp = (session: string, metrics: { name: string; points: ReturnType<typeof point>[]; cumulative?: boolean }[]) => ({
   resourceMetrics: [
     {
-      resource: { attributes: [attr('mh.session', session), attr('service.name', 'claude-code')] },
+      resource: { attributes: [attr('ih.session', session), attr('service.name', 'claude-code')] },
       scopeMetrics: [{ metrics: metrics.map((m) => ({ name: m.name, sum: { aggregationTemporality: m.cumulative ? 2 : 1, dataPoints: m.points } })) }],
     },
   ],
@@ -78,12 +78,12 @@ test('the receiver is served by the daemon, and Claude sessions are told where t
     assert.equal(store.usageTotals(board.id).inputTokens, 77);
     assert.equal((await api(cfg.port, 'POST', '/v1/logs', {})).status, 200);
 
-    const env = claudeTelemetryEnv({ endpoint: 'http://127.0.0.1:7420', attributes: { 'mh.session': session.id, 'mh.card': card.id } });
+    const env = claudeTelemetryEnv({ endpoint: 'http://127.0.0.1:7420', attributes: { 'ih.session': session.id, 'ih.card': card.id } });
     assert.equal(env.CLAUDE_CODE_ENABLE_TELEMETRY, '1');
     assert.equal(env.OTEL_EXPORTER_OTLP_PROTOCOL, 'http/json');
     assert.equal(env.OTEL_EXPORTER_OTLP_ENDPOINT, 'http://127.0.0.1:7420');
     assert.equal(env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE, 'delta');
-    assert.equal(env.OTEL_RESOURCE_ATTRIBUTES, `mh.session=${session.id},mh.card=${card.id}`);
+    assert.equal(env.OTEL_RESOURCE_ATTRIBUTES, `ih.session=${session.id},ih.card=${card.id}`);
   } finally {
     await close();
   }

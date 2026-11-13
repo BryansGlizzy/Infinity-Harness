@@ -6,7 +6,7 @@ import { request } from 'node:http';
 import { existsSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { DaemonEvent, LiveMessage } from '@mh/core';
+import type { DaemonEvent, LiveMessage } from '@ih/core';
 import { checkRequest, loadApiToken, type AuthOptions, type RequestFacts } from '../src/auth.ts';
 import { REPLAY_LIMIT } from '../src/server.ts';
 import { setup } from './harness.ts';
@@ -61,13 +61,13 @@ test('the query token is accepted on WebSockets only', () => {
 });
 
 test('the token is generated once, kept private, and overridable', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mh-token-'));
+  const dir = mkdtempSync(join(tmpdir(), 'ih-token-'));
   const file = join(dir, 'nested', 'api-token');
   const first = loadApiToken(file, {});
   assert.match(first, /^[0-9a-f]{48}$/);
   assert.equal(statSync(file).mode & 0o777, 0o600, 'readable by this user only');
   assert.equal(loadApiToken(file, {}), first, 'the same token next time');
-  assert.equal(loadApiToken(file, { MH_API_TOKEN: ' from-env ' }), 'from-env');
+  assert.equal(loadApiToken(file, { IH_API_TOKEN: ' from-env ' }), 'from-env');
   assert.ok(existsSync(file));
 });
 
@@ -203,6 +203,40 @@ test('since=now only reports where the log is; a position the daemon cannot hono
     const payload = (isStatus(far.all[0]!) ? far.all[0]!.payload : null) as { replayed: number; lost: string };
     assert.deepEqual([payload.replayed, payload.lost], [0, 'too_many'], 'too long a gap is not replayed piecemeal');
     far.ws.close();
+  } finally {
+    await t.close();
+  }
+});
+
+test('agents reach the board server with their own session token, with the access layer switched on', async () => {
+  // Found live: the layer treated any Bearer token that was not the API token as wrong, which refused every agent.
+  assert.equal(checkRequest(opts(), facts({ path: '/mcp', authorization: 'Bearer some-session-token' })), null, 'a local agent with its session token');
+  assert.equal(checkRequest(opts({ requireToken: true }), facts({ path: '/mcp', authorization: 'Bearer some-session-token' })), null, 'also when the API token is required for people');
+  assert.equal(checkRequest(opts(), facts({ path: '/v1/metrics', authorization: 'Bearer anything' })), null, 'and telemetry');
+  assert.deepEqual(checkRequest(opts(), facts({ path: '/mcp', authorization: 'Bearer some-session-token', remote: '10.0.0.5' })), { status: 401, error: 'token required' }, 'but not from another machine');
+  assert.equal(checkRequest(opts(), facts({ path: '/mcp', authorization: `Bearer ${TOKEN}`, remote: '10.0.0.5' })), null, 'unless it has the API token');
+  assert.deepEqual(checkRequest(opts(), facts({ path: '/mcp', authorization: 'Bearer some-session-token', host: 'evil.example' })), { status: 403, error: 'unexpected Host header' }, 'a rebinding page still cannot');
+  // The operator surface is as strict as ever: a session token is not the API token.
+  assert.deepEqual(checkRequest(opts(), facts({ path: '/api/boards', authorization: 'Bearer some-session-token' })), { status: 401, error: 'invalid token' });
+
+  // End to end: a card's agent calls a board tool through the real access layer.
+  const t = await setup({ auth: opts({ requireToken: true }) });
+  try {
+    const card = t.store.createCard({ boardId: t.board.id, title: 'x', description: 'y' });
+    await t.runner.run(card.id, 'fa', { agentId: 'fa' });
+    const token = (t.runner as unknown as { active: Map<string, { token: string }> }).active.get(card.id)!.token;
+    const call = (authorization: string) =>
+      fetch(`http://127.0.0.1:${t.cfg.port}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'whoami', arguments: {} } }),
+      });
+    const ok = await call(`Bearer ${token}`);
+    assert.equal(ok.status, 200);
+    assert.match(await ok.text(), /Demo/);
+    const bad = await call('Bearer not-a-session');
+    assert.equal(bad.status, 401);
+    assert.match(await bad.text(), /unknown or expired board session token/, 'refused by the board server itself, not as an invalid API token');
   } finally {
     await t.close();
   }

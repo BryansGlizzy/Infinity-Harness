@@ -28,6 +28,8 @@ export interface ConnectionOptions {
   fetch?: typeof fetch;
   /** Reads the daemon's API token over SSH (needs `remoteRoot`). Tests replace it. */
   readToken?: (profile: MachineProfile) => Promise<string>;
+  /** What a live forward is asked to prove the far end is there. The federation port serves `/fed/health`. */
+  healthPath?: string;
   /** How long to wait for the daemon to answer through a new forward. */
   readyTimeoutMs?: number;
   /** How often a live forward is checked. Two misses in a row mean it is dead. */
@@ -103,7 +105,7 @@ export function remotePath(path: string): string {
 const defaultReadToken = (profile: MachineProfile) =>
   new Promise<string>((resolve, reject) => {
     if (!profile.remoteRoot) return reject(new Error('the daemon wants its API token; set the remote folder of this machine so it can be read over SSH'));
-    const command = `cat -- ${remotePath(`${profile.remoteRoot.replace(/\/$/, '')}/.meta-harness/api-token`)}`;
+    const command = `cat -- ${remotePath(`${profile.remoteRoot.replace(/\/$/, '')}/.infinity-harness/api-token`)}`;
     const args = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', ...(profile.sshPort ? ['-p', String(profile.sshPort)] : []), ...sshExtraArgs(), '--', profile.target, command];
     execFile('ssh', args, { timeout: 30_000 }, (err, stdout, stderr) => (err ? reject(new Error(stderr.trim() || err.message)) : resolve(stdout.trim())));
   });
@@ -129,7 +131,7 @@ export class MachineConnection {
   attention: AttentionKind | null = null;
   localPort: number | null = null;
   private http: DaemonHttp;
-  private opts: Required<Pick<ConnectionOptions, 'spawn' | 'freePort' | 'readToken' | 'readyTimeoutMs' | 'checkIntervalMs' | 'checkTimeoutMs'>> & { backoff: Required<NonNullable<ConnectionOptions['backoff']>>; fetch: typeof fetch };
+  private opts: Required<Pick<ConnectionOptions, 'spawn' | 'freePort' | 'readToken' | 'readyTimeoutMs' | 'checkIntervalMs' | 'checkTimeoutMs' | 'healthPath'>> & { backoff: Required<NonNullable<ConnectionOptions['backoff']>>; fetch: typeof fetch };
   private listeners = new Set<(c: MachineConnection) => void>();
   private proc: TunnelProcess | null = null;
   private running = false;
@@ -144,6 +146,7 @@ export class MachineConnection {
       spawn: opts.spawn ?? defaultSpawn,
       freePort: opts.freePort ?? defaultFreePort,
       readToken: opts.readToken ?? defaultReadToken,
+      healthPath: opts.healthPath ?? '/api/health',
       readyTimeoutMs: opts.readyTimeoutMs ?? 20_000,
       checkIntervalMs: opts.checkIntervalMs ?? 15_000,
       checkTimeoutMs: opts.checkTimeoutMs ?? 3_000,
@@ -209,7 +212,7 @@ export class MachineConnection {
 
   private async healthy(): Promise<{ ok: boolean; auth?: string }> {
     try {
-      const res = await this.opts.fetch(new URL('/api/health', this.http.baseUrl), { signal: AbortSignal.timeout(this.opts.checkTimeoutMs) });
+      const res = await this.opts.fetch(new URL(this.opts.healthPath, this.http.baseUrl), { signal: AbortSignal.timeout(this.opts.checkTimeoutMs) });
       if (!res.ok) return { ok: false };
       return { ok: true, auth: ((await res.json()) as { auth?: string }).auth };
     } catch {

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { CARD_STATUSES, type AgentProfile, type Board, type Card, type CardStatus } from '@mh/core';
+import { CARD_STATUSES, type AgentProfile, type Board, type Card, type CardStatus } from '@ih/core';
 import { api, type ActiveSession, type PoolWithStatus } from './api.ts';
 import { ROLE_LABEL, cardAgent } from './agentInfo.ts';
 import { complexityLabel } from './labels.ts';

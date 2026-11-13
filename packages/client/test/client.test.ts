@@ -1,6 +1,6 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import type { DaemonEvent, LiveMessage } from '@mh/core';
+import type { DaemonEvent, LiveMessage } from '@ih/core';
 import { DaemonApi, DaemonHttp, EventStream, HttpError, REPLAY_WITHIN_MS, type StreamMessage } from '../src/index.ts';
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });

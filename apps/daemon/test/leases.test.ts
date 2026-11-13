@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '@mh/db';
+import { Store } from '@ih/db';
 import { LeaseConflict, heldByOthers, normalizeGlob, overlaps, reservePaths, toRepoPath } from '../src/leases.ts';
 
 test('overlaps: literals, directories and globs', () => {

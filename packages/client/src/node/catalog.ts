@@ -14,7 +14,7 @@ export interface MachineProfile {
   sshPort?: number;
   /** The port the daemon listens on, on that machine. */
   remotePort: number;
-  /** The Infinity Harness folder on that machine; lets a client read `.meta-harness/api-token` over SSH when the daemon requires one. */
+  /** The Infinity Harness folder on that machine; lets a client read `.infinity-harness/api-token` over SSH when the daemon requires one. */
   remoteRoot?: string;
   enabled: boolean;
 }

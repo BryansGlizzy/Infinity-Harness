@@ -124,7 +124,7 @@ test('gateway: auth, key swap, usage, 429 lock, and pacing a burst', async () =>
     assert.equal(ok.status, 200);
     await ok.text();
     assert.equal(seen[0]!.auth, 'Bearer real-key');
-    assert.equal(seen[0]!.ua, 'meta-harness/0.1');
+    assert.equal(seen[0]!.ua, 'infinity-harness/0.1');
     assert.deepEqual(JSON.parse(seen[0]!.body).stream_options, { include_usage: true });
     assert.deepEqual(usage, [16]);
 

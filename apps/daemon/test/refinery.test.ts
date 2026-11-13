@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentProfile, DaemonEvent, Settings } from '@mh/core';
-import type { Store } from '@mh/db';
+import type { AgentProfile, DaemonEvent, Settings } from '@ih/core';
+import type { Store } from '@ih/db';
 import { advanceBranch, git } from '../src/git.ts';
 import type { GitHub } from '../src/github.ts';
 import { isGitHubRemote } from '../src/github.ts';
@@ -139,7 +139,7 @@ test('failing tests go back to the author, then escalate to a human', async () =
 
 test('PR landing: push, open and merge the PR, then follow origin locally', async () => {
   const calls: string[] = [];
-  const remote = mkdtempSync(join(tmpdir(), 'mh-origin-'));
+  const remote = mkdtempSync(join(tmpdir(), 'ih-origin-'));
   // Stands in for GitHub: "merging" merges the pushed branch into the bare remote's main.
   const github: GitHub = {
     async openPr(_repo, pr) {
@@ -148,7 +148,7 @@ test('PR landing: push, open and merge the PR, then follow origin locally', asyn
     },
     async mergePr(_repo, url, { subject }) {
       calls.push(`merge ${url}`);
-      const clone = mkdtempSync(join(tmpdir(), 'mh-clone-'));
+      const clone = mkdtempSync(join(tmpdir(), 'ih-clone-'));
       await git(clone, ['clone', '-q', remote, '.']);
       const branch = calls[0]!.split(' ')[1]!;
       await git(clone, ['-c', 'user.name=gh', '-c', 'user.email=gh@test', 'merge', '--no-ff', '-q', '-m', subject, `origin/${branch}`]);

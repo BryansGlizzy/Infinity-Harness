@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { MachineCatalog, Fleet, defaultCatalogFile, localEndpointFromEnv, type ConnectionOptions } from '@mh/client/node';
+import { MachineCatalog, Fleet, defaultCatalogFile, localEndpointFromEnv, type ConnectionOptions } from '@ih/client/node';
 import { App } from './app.ts';
 import { SeenStore } from './seen.ts';
 import { RealTerminal } from './term.ts';

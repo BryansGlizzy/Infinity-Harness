@@ -1,5 +1,5 @@
 // Shapes of the daemon's REST responses, shared by every client (web UI, VS Code, CLI, TUI).
-import type { Artifact, Board, Lease, ModelOption, Pool, ReasoningOptions, Skill } from '@mh/core';
+import type { Artifact, Board, Lease, ModelOption, Pool, ReasoningOptions, Skill } from '@ih/core';
 
 export interface WindowUsage {
   window: string;
@@ -15,7 +15,17 @@ export interface PoolStatus {
   lockedUntil: number | null;
   queued: number;
 }
-export type PoolWithStatus = Pool & { status: PoolStatus; running: number };
+/** Whether a pool's model is answering (`/api/pools`, `/api/pools/:id/test`). */
+export interface PoolHealthView {
+  reachable: 'online' | 'offline' | 'unknown';
+  checked: 'endpoint' | 'harness';
+  latencyMs: number | null;
+  checkedAt: string | null;
+  detail: string | null;
+  /** Taken out of rotation after its endpoint stopped answering; stays out until a person puts it back. */
+  ejected: { since: string; reason: string } | null;
+}
+export type PoolWithStatus = Pool & { status: PoolStatus; running: number; health?: PoolHealthView };
 
 /** An open agent session on some pool and board (`/api/sessions/active`). */
 export interface ActiveSession {
@@ -146,6 +156,8 @@ export interface PoolSummary {
   label: string;
   running: number;
   status: { state: 'open' | 'warn' | 'halted' | 'locked'; windows: { window: string; pct: number }[] };
+  /** Is the model answering; a pool out of rotation has `ejected` set. */
+  health?: { reachable: 'online' | 'offline' | 'unknown'; latencyMs: number | null; ejected: { since: string; reason: string } | null };
 }
 
 /** A comment on a line of a card's diff. */
@@ -155,3 +167,67 @@ export interface ReviewComment {
   endLine?: number;
   body: string;
 }
+
+// --- swarm federation (Phase 7)
+import type { FederationNeeds, FederationState, FedRequest, Peer, PeerProject, ProjectCard, SharedProject, Visibility } from '@ih/core';
+
+export interface FederationOverview extends FederationState {
+  peers: Peer[];
+  shared: SharedProject[];
+  needs: FederationNeeds;
+}
+export interface PeerDetail {
+  peer: Peer;
+  projects: PeerProject[];
+  requests: FedRequest[];
+}
+export interface PeerPreview {
+  allowed: Visibility;
+  name: string;
+  projects: ProjectCard[];
+}
+export interface PeerHit {
+  peer: Peer;
+  card: ProjectCard;
+  score: number;
+}
+
+// --- system harnesses & agent installation / sign-in
+export type SystemHarnessId = 'claude' | 'codex' | 'kimi' | 'agy' | 'opencode' | 'gh';
+export type HarnessAuthStatus = 'signed_in' | 'signed_out' | 'configured' | 'unconfigured' | 'unknown';
+
+export interface HarnessLoginFlow {
+  active: boolean;
+  url: string | null;
+  code: string | null;
+  output: string;
+  error: string | null;
+  startedAt: string;
+}
+
+export interface SystemHarnessStatus {
+  id: SystemHarnessId;
+  label: string;
+  description: string;
+  poolIds: string[];
+  installed: boolean;
+  binaryPath: string | null;
+  missingParts: string[];
+  version: string | null;
+  auth: {
+    status: HarnessAuthStatus;
+    detail: string | null;
+    account: string | null;
+  };
+  installCommand: string;
+  loginCommand: string | null;
+  supportsApiKeyLogin?: boolean;
+  loginFlow: HarnessLoginFlow | null;
+  envConfig?: {
+    nimApiKeySet: boolean;
+    nimModel: string;
+    localBaseUrl: string;
+    localModel: string;
+  };
+}
+

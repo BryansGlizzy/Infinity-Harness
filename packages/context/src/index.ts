@@ -1,8 +1,8 @@
 // Context store (master plan §5.7): artifacts attached to cards, searched with FTS5 and embeddings (hybrid), with
 // fast-lane query rewrite (#3) and tagging (#4). FTS alone keeps working whenever the embeddings endpoint is down.
-import type { Artifact, ArtifactKind, Settings } from '@mh/core';
-import type { NewArtifact, Store } from '@mh/db';
-import { queryRewriteJob, readQueryRewrite, readTagging, taggingJob, type FastLane } from '@mh/fast-lane';
+import type { Artifact, ArtifactKind, Settings } from '@ih/core';
+import type { NewArtifact, Store } from '@ih/db';
+import { queryRewriteJob, readQueryRewrite, readTagging, taggingJob, type FastLane } from '@ih/fast-lane';
 
 export interface EmbedderOptions {
   /** OpenAI-compatible base URL, e.g. http://host:8889/v1 */

@@ -1,3 +1,4 @@
+import { FEDERATION_MIGRATION, FEDERATION_MIGRATION_2, FedStore } from './federation.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -32,7 +33,7 @@ import {
   type Message,
   type Session,
   type SessionState,
-} from '@mh/core';
+} from '@ih/core';
 
 // Each entry runs once, in order; the index is the schema version.
 const MIGRATIONS = [
@@ -226,6 +227,15 @@ const MIGRATIONS = [
   );
   CREATE INDEX pool_samples_pool ON pool_samples(pool_id, ts);
   `,
+  FEDERATION_MIGRATION,
+  FEDERATION_MIGRATION_2,
+  // Agents' requests to other swarms used to wait for a person by default; they now go straight out. Boards that saved
+  // the old default (nobody had chosen it) follow the new one.
+  `UPDATE settings SET settings_json = json_set(settings_json, '$.peerRequestApproval', json('false')) WHERE json_extract(settings_json, '$.peerRequestApproval') = 1;`,
+  // "Messages for you" can be cleared; a cleared message stays in the log, it just stops asking for attention.
+  `ALTER TABLE messages ADD COLUMN dismissed_at TEXT;`,
+  // A pool whose endpoint stopped answering is taken out of rotation until a person puts it back.
+  `CREATE TABLE pool_ejections (pool_id TEXT PRIMARY KEY, since TEXT NOT NULL, reason TEXT NOT NULL);`,
 ];
 
 type Row = Record<string, string | number | null>;
@@ -361,6 +371,7 @@ function toMessage(r: Row): Message {
     urgent: Number(r.urgent) === 1,
     createdAt: String(r.created_at),
     deliveredAt: str(r.delivered_at),
+    dismissedAt: str(r.dismissed_at),
   };
 }
 
@@ -523,6 +534,8 @@ export interface PoolSample {
 /** SQLite-backed store. Every mutation appends to the event log in the same transaction. */
 export class Store {
   readonly db: DatabaseSync;
+  /** Swarm federation storage (Phase 7). */
+  readonly fed: FedStore = new FedStore(this);
   private listeners = new Set<(e: DaemonEvent) => void>();
 
   constructor(file: string) {
@@ -598,6 +611,11 @@ export class Store {
     }
   }
 
+  /** Runs `fn` in one transaction; events appended inside are delivered after it commits. */
+  transact<T>(fn: () => T): T {
+    return this.mutate(fn);
+  }
+
   private mutate<T>(fn: () => T): T {
     const out = this.tx(fn);
     this.flush();
@@ -605,6 +623,39 @@ export class Store {
   }
 
   // --- boards
+
+  /**
+   * Removes a board and everything the harness keeps about it: cards and their sessions, notes, messages, approvals,
+   * leases, outcomes, usage, settings, the project card it shared and the events of its cards. Requests exchanged with
+   * other swarms stay as history, detached from the board. The project folder is not touched.
+   */
+  deleteBoard(boardId: string): void {
+    this.mutate(() => {
+      const ids = (this.db.prepare('SELECT id FROM nodes WHERE board_id = ?').all(boardId) as Row[]).map((r) => String(r.id));
+      const chunks = <T,>(xs: T[], n = 400) => Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, i * n + n));
+      for (const part of chunks(ids)) {
+        const marks = part.map(() => '?').join(', ');
+        this.db.prepare(`DELETE FROM edges WHERE from_node IN (${marks}) OR to_node IN (${marks})`).run(...part, ...part);
+        this.db.prepare(`DELETE FROM sessions WHERE card_id IN (${marks})`).run(...part);
+        this.db.prepare(`DELETE FROM events WHERE subject IN (${marks})`).run(...part);
+      }
+      this.db.prepare('DELETE FROM leases WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM messages WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM approvals WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM outcomes WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM artifacts_fts WHERE artifact_id IN (SELECT id FROM artifacts WHERE board_id = ?)').run(boardId);
+      this.db.prepare('DELETE FROM artifacts WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM usage_events WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM settings WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM fed_shared WHERE board_id = ?').run(boardId);
+      this.db.prepare('UPDATE fed_requests SET board_id = NULL, card_id = NULL WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM events WHERE subject = ?').run(boardId);
+      // One statement, so the cards' links to their parents do not matter.
+      this.db.prepare('DELETE FROM nodes WHERE board_id = ?').run(boardId);
+      this.db.prepare('DELETE FROM boards WHERE id = ?').run(boardId);
+      this.append('board.removed', boardId, { id: boardId }, 'user:local');
+    });
+  }
 
   createBoard(input: { name: string; repoPath: string; defaultBranch: string; mode?: BoardMode }): Board {
     return this.mutate(() => {
@@ -912,7 +963,7 @@ export class Store {
 
   postMessage(input: { boardId: string; fromActor: string; toCard: string | null; body: string; urgent: boolean }): Message {
     return this.mutate(() => {
-      const message: Message = { id: newId('m'), ...input, createdAt: new Date().toISOString(), deliveredAt: null };
+      const message: Message = { id: newId('m'), ...input, createdAt: new Date().toISOString(), deliveredAt: null, dismissedAt: null };
       this.db
         .prepare('INSERT INTO messages (id, board_id, from_actor, to_card, body, urgent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(message.id, message.boardId, message.fromActor, message.toCard, message.body, message.urgent ? 1 : 0, message.createdAt);
@@ -940,6 +991,49 @@ export class Store {
         const m = toMessage(this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as Row);
         if (m.toCard) this.append('message.delivered', m.toCard, m);
       }
+    });
+  }
+
+  /**
+   * Clears messages for the humans (not agents' mail to each other) from the attention list: the ones named in `ids`,
+   * or all of the board's when `ids` is omitted. Returns the ids that were cleared.
+   */
+  dismissMessages(boardId: string, ids?: string[]): string[] {
+    return this.mutate(() => {
+      const now = new Date().toISOString();
+      const open = (
+        this.db.prepare('SELECT id FROM messages WHERE board_id = ? AND to_card IS NULL AND dismissed_at IS NULL').all(boardId) as Row[]
+      ).map((r) => String(r.id));
+      const wanted = ids ? new Set(ids) : null;
+      const cleared = open.filter((id) => !wanted || wanted.has(id));
+      for (const id of cleared) this.db.prepare('UPDATE messages SET dismissed_at = ? WHERE id = ?').run(now, id);
+      if (cleared.length) this.append('message.dismissed', boardId, { boardId, ids: cleared, at: now }, 'user:local');
+      return cleared;
+    });
+  }
+
+  // --- pool ejections (an endpoint that stopped answering stays out of routing until a person restores it)
+
+  poolEjections(): { poolId: string; since: string; reason: string }[] {
+    return (this.db.prepare('SELECT * FROM pool_ejections').all() as Row[]).map((r) => ({ poolId: String(r.pool_id), since: String(r.since), reason: String(r.reason) }));
+  }
+
+  /** Takes a pool out of rotation. False when it already is (the first reason stands). */
+  ejectPool(poolId: string, reason: string): boolean {
+    return this.mutate(() => {
+      if (this.db.prepare('SELECT 1 FROM pool_ejections WHERE pool_id = ?').get(poolId)) return false;
+      const since = new Date().toISOString();
+      this.db.prepare('INSERT INTO pool_ejections (pool_id, since, reason) VALUES (?, ?, ?)').run(poolId, since, reason);
+      this.append('pool.ejected', poolId, { poolId, since, reason }, 'daemon:health');
+      return true;
+    });
+  }
+
+  restorePool(poolId: string): boolean {
+    return this.mutate(() => {
+      if (!this.db.prepare('DELETE FROM pool_ejections WHERE pool_id = ? RETURNING 1').get(poolId)) return false;
+      this.append('pool.restored', poolId, { poolId }, 'user:local');
+      return true;
     });
   }
 
@@ -998,6 +1092,20 @@ export class Store {
          FROM usage_events WHERE board_id = ? AND ts >= ? AND (? IS NULL OR agent_id = ?)`,
       )
       .get(boardId, opts.sinceIso ?? '', opts.agentId ?? null, opts.agentId ?? null) as Row;
+    return { inputTokens: Number(r.i), outputTokens: Number(r.o), cacheTokens: Number(r.c), costUsd: Number(r.usd), requests: Number(r.n) };
+  }
+
+  /** What a set of cards has used since `sinceIso` (all time when omitted). Used for the budget of a request from another swarm. */
+  usageForCards(cardIds: string[], sinceIso = ''): UsageTotals {
+    if (!cardIds.length) return { inputTokens: 0, outputTokens: 0, cacheTokens: 0, costUsd: 0, requests: 0 };
+    const marks = cardIds.map(() => '?').join(', ');
+    const r = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o, COALESCE(SUM(cache_tokens), 0) AS c,
+                COALESCE(SUM(cost_usd), 0) AS usd, COUNT(*) AS n
+         FROM usage_events WHERE card_id IN (${marks}) AND ts >= ?`,
+      )
+      .get(...cardIds, sinceIso) as Row;
     return { inputTokens: Number(r.i), outputTokens: Number(r.o), cacheTokens: Number(r.c), costUsd: Number(r.usd), requests: Number(r.n) };
   }
 
@@ -1412,13 +1520,21 @@ export class Store {
   }
 
   /** Events about one subject (a card's events use the card id as subject). */
+  /**
+   * A subject's events, oldest first. With `afterSeq` it pages forward from there; without it, a subject with more than
+   * `limit` events returns the NEWEST `limit` (the oldest ones used to be returned, which left a long-running card's
+   * panel, narration and summary stuck in its first minutes).
+   */
   eventsFor(subject: string, afterSeq = 0, limit = 2000): DaemonEvent[] {
-    return (
-      this.db.prepare('SELECT * FROM events WHERE subject = ? AND seq > ? ORDER BY seq LIMIT ?').all(subject, afterSeq, limit) as Row[]
-    ).map(toEvent);
+    if (afterSeq > 0) {
+      return (this.db.prepare('SELECT * FROM events WHERE subject = ? AND seq > ? ORDER BY seq LIMIT ?').all(subject, afterSeq, limit) as Row[]).map(toEvent);
+    }
+    return (this.db.prepare('SELECT * FROM events WHERE subject = ? ORDER BY seq DESC LIMIT ?').all(subject, limit) as Row[]).map(toEvent).reverse();
   }
 
   close() {
     this.db.close();
   }
 }
+
+export * from './federation.ts';

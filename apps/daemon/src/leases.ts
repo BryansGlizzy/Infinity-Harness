@@ -1,6 +1,6 @@
 import { isAbsolute, matchesGlob, normalize, relative } from 'node:path';
-import type { Lease } from '@mh/core';
-import type { Store } from '@mh/db';
+import type { Lease } from '@ih/core';
+import type { Store } from '@ih/db';
 
 const GLOB_CHARS = /[*?[\]{}]/;
 const DEFAULT_TTL_MS = 30 * 60_000;

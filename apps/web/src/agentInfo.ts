@@ -1,4 +1,4 @@
-import { effectiveAgents, type AgentProfile, type Card, type CardRole, type Settings } from '@mh/core';
+import { effectiveAgents, type AgentProfile, type Card, type CardRole, type Settings } from '@ih/core';
 import type { ActiveSession, PoolWithStatus } from './api.ts';
 
 export const HARNESS_LABEL: Record<string, string> = {

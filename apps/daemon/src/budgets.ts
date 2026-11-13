@@ -1,6 +1,6 @@
-import type { Budget, Settings } from '@mh/core';
-import type { Store } from '@mh/db';
-import type { PoolState, RateLimiter } from '@mh/gateway';
+import type { Budget, Settings } from '@ih/core';
+import type { Store } from '@ih/db';
+import type { PoolState, RateLimiter } from '@ih/gateway';
 
 // Budgets (master plan Phase 6.3): a cap on tokens or dollars per board and per agent. They live in the same limiter as
 // the pools' rate limits, as scopes of their own, so they behave the same way: `warn` from 80% (the agent ranks lower),

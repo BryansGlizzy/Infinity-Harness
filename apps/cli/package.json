@@ -1,5 +1,5 @@
 {
-  "name": "@mh/cli",
+  "name": "@ih/cli",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,8 +7,8 @@
     "ih": "./src/main.ts"
   },
   "dependencies": {
-    "@mh/client": "workspace:*",
-    "@mh/core": "workspace:*",
-    "@mh/tui": "workspace:*"
+    "@ih/client": "workspace:*",
+    "@ih/core": "workspace:*",
+    "@ih/tui": "workspace:*"
   }
 }

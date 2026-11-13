@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import * as vscode from 'vscode';
-import type { Approval, Card, DaemonEvent, Message, Outcome } from '@mh/core';
+import type { Approval, Card, DaemonEvent, FedRequest, Message, Outcome, Peer } from '@ih/core';
 import { disposeBoard, initBoardPanel, openBoard } from './boardPanel.ts';
 import { SCHEME, showChanges, VersionProvider } from './changes.ts';
 import { ChatView } from './chat.ts';
@@ -169,7 +169,7 @@ export function activate(context: vscode.ExtensionContext) {
         // Not a git repository: direct mode by default, like the vendor IDE assistants; worktrees need git set up first.
         const pick = await vscode.window.showQuickPick(
           [
-            { label: '$(edit) Work directly in this folder', description: 'Recommended', detail: 'Agents edit the files here as they go, like an IDE assistant. No git, branches, reviews or landing; one worker at a time by default.', mode: 'direct' as const },
+            { label: '$(edit) Work directly in this folder', description: 'Recommended', detail: 'Agents edit the files here as they go, like an IDE assistant. No git, branches, reviews or landing; up to three workers at once by default.', mode: 'direct' as const },
             { label: '$(git-branch) Set up git and use worktrees', detail: 'git init, README, .gitignore and a first commit; then each card works on its own branch and lands through the merge queue.', mode: 'worktree' as const },
           ],
           { title: `${basename(folder)} isn't a git repository`, placeHolder: 'How should agents work on it?' },
@@ -364,6 +364,118 @@ export function activate(context: vscode.ExtensionContext) {
       void model.refresh();
     },
 
+    'infinityHarness.decidePeer': async (peer?: Peer) => {
+      const p = peer ?? (await vscode.window.showQuickPick(model.federation.knocks.map((x) => ({ label: x.knock?.name ?? x.name ?? x.label, description: x.fingerprint ?? '', x })), { placeHolder: 'Which swarm?' }))?.x;
+      if (!p) return;
+      const name = p.knock?.name ?? p.name ?? p.label;
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: '$(check) Accept this swarm', detail: 'Pins its key. What it says reaches your agents as data, and so your model vendors. Compare the fingerprint with its operator first.', v: 'approve' as const },
+          { label: '$(close) Deny', detail: 'It may knock again.', v: 'deny' as const },
+          { label: '$(circle-slash) Block', detail: 'Ignore its knocks from now on.', v: 'block' as const },
+        ],
+        { title: `"${name}" wants to connect. Fingerprint: ${p.fingerprint ?? '?'}`, ignoreFocusOut: true },
+      );
+      if (!pick) return;
+      if (pick.v === 'approve') {
+        const sure = await vscode.window.showWarningMessage(`Accept "${name}"? Fingerprint ${p.fingerprint ?? '?'}. Does it match what its operator reads out?`, { modal: true }, 'Accept');
+        if (sure !== 'Accept') return;
+      }
+      await model.client.decidePeer(p.id, pick.v);
+      void model.refresh();
+    },
+
+    'infinityHarness.decidePeerRequest': async (request?: FedRequest) => {
+      const r = request ?? (await vscode.window.showQuickPick(model.federation.requests.map((x) => ({ label: x.title, description: x.peerName ?? '', x })), { placeHolder: 'Which request?' }))?.x;
+      if (!r) return;
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: '$(check) Approve', detail: 'The board\'s orchestrator plans it as a goal. It is marked as coming from outside.', v: 'approve' as const },
+          { label: '$(question) Ask a question', detail: 'The request waits until they answer.', v: 'ask' as const },
+          { label: '$(close) Decline', v: 'decline' as const },
+          { label: '$(go-to-file) Read it in full', v: 'read' as const },
+        ],
+        { title: `From ${r.peerName ?? 'a peer'}: ${r.title}`, placeHolder: r.description.split('\n')[0]?.slice(0, 120) },
+      );
+      if (!pick) return;
+      if (pick.v === 'read') {
+        const doc = await vscode.workspace.openTextDocument({ content: `# ${r.title}\n\nFrom ${r.peerName ?? 'a peer'} (their words, untrusted)\n\n${r.description}\n${r.acceptance.length ? `\nAcceptance:\n${r.acceptance.map((a) => `- ${a}`).join('\n')}\n` : ''}`, language: 'markdown' });
+        await vscode.window.showTextDocument(doc, { preview: true });
+        return;
+      }
+      if (pick.v === 'approve') {
+        const note = await vscode.window.showInputBox({ title: 'A note for the orchestrator and the requester (optional)', ignoreFocusOut: true });
+        if (note === undefined) return;
+        await model.client.approvePeerRequest(r.id, note.trim() || undefined);
+      } else {
+        const text = await vscode.window.showInputBox({ title: pick.v === 'ask' ? 'Your question' : 'Why are you declining? The requester reads this', ignoreFocusOut: true });
+        if (!text?.trim()) return;
+        await (pick.v === 'ask' ? model.client.askPeerInfo(r.id, text.trim()) : model.client.declinePeerRequest(r.id, text.trim()));
+      }
+      void model.refresh();
+    },
+
+    'infinityHarness.decidePeerReply': async (request?: FedRequest) => {
+      const r = request ?? (await vscode.window.showQuickPick(model.federation.replies.map((x) => ({ label: x.title, description: x.peerName ?? '', x })), { placeHolder: 'Which request?' }))?.x;
+      if (!r) return;
+      if (r.status === 'needs_info') {
+        const answer = await vscode.window.showInputBox({ title: `${r.peerName ?? 'They'} ask: ${[...r.thread].reverse().find((e) => e.side === 'receiver')?.text ?? ''}`, prompt: 'Your answer', ignoreFocusOut: true });
+        if (!answer?.trim()) return;
+        await model.client.commentPeerRequest(r.id, answer.trim());
+      } else {
+        const pick = await vscode.window.showQuickPick(
+          [
+            { label: '$(check) It works: mark done', v: 'confirm' as const },
+            { label: '$(close) Send it back', detail: 'Tell them what is still wrong; the request waits for their decision again.', v: 'reopen' as const },
+          ],
+          { title: `${r.peerName ?? 'They'} landed "${r.title}": ${r.resolution?.ref ?? ''}`, ignoreFocusOut: true },
+        );
+        if (!pick) return;
+        if (pick.v === 'confirm') await model.client.confirmPeerRequest(r.id);
+        else {
+          const why = await vscode.window.showInputBox({ title: 'What is still wrong? They read this.', ignoreFocusOut: true });
+          if (!why?.trim()) return;
+          await model.client.reopenPeerRequest(r.id, why.trim());
+        }
+      }
+      void model.refresh();
+    },
+
+    'infinityHarness.removeBoard': async () => {
+      const board = model.board;
+      if (!board) return vscode.window.showInformationMessage('This workspace has no board to remove.');
+      const info = await model.client.boardRemoval(board.id);
+      if (info.blocked) return vscode.window.showWarningMessage(info.blocked);
+      const facts = [`${info.cards} card(s)`, info.running ? `${info.running} agent(s) working` : '', info.dirtyWorktrees ? `${info.dirtyWorktrees} worktree(s) with unsaved changes` : '', info.folder.unlandedBranches ? `${info.folder.unlandedBranches} branch(es) not landed` : ''].filter(Boolean).join(', ');
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: '$(close) Remove from Infinity Harness', detail: `Forgets the board and its cards, notes and settings. Your folder, branches and history stay. (${facts})`, v: 'forget' as const },
+          { label: '$(trash) Delete on system…', detail: info.deleteBlocked ?? `Also deletes ${board.repoPath} from the disk. You will be asked to confirm.`, v: 'delete' as const },
+        ],
+        { title: `Remove "${board.name}"`, ignoreFocusOut: true },
+      );
+      if (!pick) return;
+      if (pick.v === 'delete') {
+        if (info.deleteBlocked) return vscode.window.showWarningMessage(info.deleteBlocked);
+        const sure = await vscode.window.showWarningMessage(`Delete ${board.repoPath} from the disk, with everything in it? This cannot be undone.`, { modal: true }, 'Delete the folder');
+        if (sure !== 'Delete the folder') return;
+        const typed = await vscode.window.showInputBox({ title: `Type the board's name to confirm: ${board.name}`, ignoreFocusOut: true });
+        if (typed === undefined) return;
+        if (typed !== board.name) return vscode.window.showWarningMessage("That is not the board's name; nothing was deleted.");
+        await model.client.removeBoard(board.id, 'delete', typed);
+        void vscode.window.showInformationMessage(`Deleted "${board.name}" and its folder.`);
+      } else {
+        await model.client.removeBoard(board.id, 'forget');
+        void vscode.window.showInformationMessage(`Removed "${board.name}" from Infinity Harness. The folder is untouched.`);
+      }
+      void model.refresh();
+    },
+
+    'infinityHarness.openSwarms': async () => {
+      if (model.state === 'offline' && !(await requireBoard())) return;
+      await openBoard(model, { view: 'swarms' });
+    },
+
     'infinityHarness.approveApproval': async (a?: Approval) => {
       if (!a) return vscode.commands.executeCommand('infinityHarness.decideApproval');
       const note = a.kind === 'escalation' ? await vscode.window.showInputBox({ title: 'Your answer to the agent', ignoreFocusOut: true }) : undefined;
@@ -388,6 +500,42 @@ export function activate(context: vscode.ExtensionContext) {
     },
 
     'infinityHarness.openChat': () => vscode.commands.executeCommand('infinityHarness.chat.focus'),
+
+    // Messages for you: clear one (its inline button), or all of them. They stay in the card's own log.
+    'infinityHarness.clearMessage': async (item?: { kind?: string; message?: Message }) => {
+      if (!model.board || !item?.message) return;
+      await model.client.dismissMessages(model.board.id, [item.message.id]);
+      void model.refresh();
+    },
+    'infinityHarness.clearMessages': async () => {
+      if (!model.board || !model.inbox.length) return;
+      await model.client.dismissMessages(model.board.id, model.inbox.map((m) => m.id));
+      void model.refresh();
+    },
+
+    // Is each pool's model answering? Test one now; a pool that was taken out of rotation goes back on request.
+    'infinityHarness.pools': async () => {
+      const pools = await model.client.pools();
+      const label = (p: (typeof pools)[number]) => (p.health?.ejected ? 'out of rotation' : p.health?.reachable === 'online' ? `online${p.health.latencyMs !== null ? ` ${p.health.latencyMs} ms` : ''}` : p.health?.reachable === 'offline' ? 'no response' : 'not checked');
+      const pick = await vscode.window.showQuickPick(
+        pools.map((p) => ({ label: `${p.health?.ejected ? '$(circle-slash)' : p.health?.reachable === 'offline' ? '$(error)' : p.health?.reachable === 'online' ? '$(pass)' : '$(question)'} ${p.label}`, description: label(p), detail: p.health?.ejected ? `Out since ${new Date(p.health.ejected.since).toLocaleTimeString()}: ${p.health.ejected.reason}. Not held against the model.` : p.health?.detail ?? undefined, p })),
+        { placeHolder: 'Pools: pick one to test whether its model answers' },
+      );
+      if (!pick) return;
+      const actions = [{ label: '$(pulse) Test now', v: 'test' as const }, ...(pick.p.health?.ejected ? [{ label: '$(debug-restart) Put back in rotation', v: 'restore' as const }] : [])];
+      const act = actions.length === 1 ? actions[0] : await vscode.window.showQuickPick(actions, { title: pick.p.label });
+      if (!act) return;
+      if (act.v === 'restore') {
+        await model.client.restorePool(pick.p.id);
+        vscode.window.showInformationMessage(`${pick.p.label} is back in rotation.`);
+      } else {
+        const v = await model.client.testPool(pick.p.id);
+        const text = v.reachable === 'online' ? `${pick.p.label}: online${v.latencyMs !== null ? `, ${v.latencyMs} ms` : ''}.` : `${pick.p.label}: no response${v.detail ? ` (${v.detail})` : ''}.`;
+        if (v.reachable === 'online') vscode.window.showInformationMessage(text);
+        else vscode.window.showWarningMessage(text);
+      }
+      void model.refresh();
+    },
 
     'infinityHarness.showText': (text: string) => vscode.window.showInformationMessage(text, { modal: true }),
   };
@@ -428,6 +576,18 @@ function notify(model: HarnessModel, e: DaemonEvent) {
   } else if (e.type === 'approval.created') {
     const a = e.payload as Approval;
     void vscode.window.showInformationMessage(`${APPROVAL_LABEL[a.kind]}: ${a.summary.length > 160 ? `${a.summary.slice(0, 160)}…` : a.summary}`, 'Decide').then((c) => c && vscode.commands.executeCommand('infinityHarness.decideApproval', a));
+  } else if (e.type === 'peer.updated' && (e.payload as { created?: boolean; trust?: string }).created && (e.payload as { trust?: string }).trust === 'pending') {
+    void vscode.window.showInformationMessage('A swarm wants to connect to this one.', 'Decide').then(async (c) => {
+      if (!c) return;
+      await model.refresh();
+      void vscode.commands.executeCommand('infinityHarness.decidePeer');
+    });
+  } else if (e.type === 'request.updated' && (e.payload as { created?: boolean; direction?: string }).created && (e.payload as { direction?: string }).direction === 'in') {
+    void vscode.window.showInformationMessage('Another swarm sent a request.', 'Decide').then(async (c) => {
+      if (!c) return;
+      await model.refresh();
+      void vscode.commands.executeCommand('infinityHarness.decidePeerRequest');
+    });
   } else if (e.type === 'message.posted') {
     const m = e.payload as Message;
     // Approvals pop up on their own (approval.created), with a Decide button.

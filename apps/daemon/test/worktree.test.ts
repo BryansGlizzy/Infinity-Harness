@@ -14,21 +14,21 @@ const settings = (worktreeSetup: string, worktreeSetupTimeoutSec = 30) => ({ wor
 
 async function fresh(name = 'card') {
   const repo = await tempRepo();
-  const dir = join(mkdtempSync(join(tmpdir(), 'mh-wt-')), name);
-  assert.equal(await ensureWorktree(repo, dir, `mh/${name}`, 'main'), 'created');
+  const dir = join(mkdtempSync(join(tmpdir(), 'ih-wt-')), name);
+  assert.equal(await ensureWorktree(repo, dir, `ih/${name}`, 'main'), 'created');
   const board = { id: 'b_test', name: 'T', repoPath: repo, defaultBranch: 'main', mode: 'worktree' as const, createdAt: '' };
-  return { repo, dir, board, branch: `mh/${name}` };
+  return { repo, dir, board, branch: `ih/${name}` };
 }
 
 test('setup runs once per worktree and command, with the environment a script needs, and failures are reported not hidden', async () => {
   const { dir, board, branch, repo } = await fresh();
   const s = new WorktreeSetup({ env: process.env });
-  const cmd = 'mkdir -p node_modules && echo "$MH_BRANCH $MH_BOARD $MH_WORKTREE" >> node_modules/ran.txt && test -f "$MH_REPO_PATH/README.md" && echo installed';
+  const cmd = 'mkdir -p node_modules && echo "$IH_BRANCH $IH_BOARD $IH_WORKTREE" >> node_modules/ran.txt && test -f "$IH_REPO_PATH/README.md" && echo installed';
 
   const first = await s.ensure('c1', board, dir, branch, settings(cmd));
   assert.deepEqual([first.ran, first.ok, first.output.trim()], [true, true, 'installed']);
   assert.equal(readFileSync(join(dir, 'node_modules/ran.txt'), 'utf8').trim(), `${branch} b_test ${dir}`);
-  assert.equal((await git(dir, ['status', '--porcelain'])).includes('mh-worktree-setup'), false, 'the marker is not in the work tree');
+  assert.equal((await git(dir, ['status', '--porcelain'])).includes('ih-worktree-setup'), false, 'the marker is not in the work tree');
 
   assert.equal((await s.ensure('c1', board, dir, branch, settings(cmd))).ran, false, 'already done for this command');
   assert.equal((await s.ensure('c1', board, dir, branch, settings(''))).ran, false, 'no command, nothing to do');
@@ -50,7 +50,7 @@ test('installs do not all run at once', async () => {
   const a = await fresh('a');
   const b = await fresh('b');
   const c = await fresh('c');
-  const log = join(mkdtempSync(join(tmpdir(), 'mh-log-')), 'order.txt');
+  const log = join(mkdtempSync(join(tmpdir(), 'ih-log-')), 'order.txt');
   const s = new WorktreeSetup({ env: process.env, concurrency: 1 });
   const cmd = `echo start >> ${log}; sleep 0.15; echo end >> ${log}`;
   await Promise.all([a, b, c].map((w, i) => s.ensure(`c${i}`, w.board, w.dir, w.branch, settings(cmd))));
@@ -59,23 +59,23 @@ test('installs do not all run at once', async () => {
 
 test('a folder in the way is moved aside, a registered worktree is reused, a stale registration is repaired', async () => {
   const repo = await tempRepo();
-  const root = mkdtempSync(join(tmpdir(), 'mh-wt-'));
+  const root = mkdtempSync(join(tmpdir(), 'ih-wt-'));
   const dir = join(root, 'card');
 
   // A leftover folder that is not a worktree (an interrupted run, a copied folder): it may hold someone's work.
   mkdirSync(dir);
   writeFileSync(join(dir, 'precious.txt'), 'do not lose me');
-  assert.equal(await ensureWorktree(repo, dir, 'mh/one', 'main'), 'created');
+  assert.equal(await ensureWorktree(repo, dir, 'ih/one', 'main'), 'created');
   assert.ok(existsSync(join(dir, 'README.md')), 'now a real worktree');
   const aside = (await import('node:fs')).readdirSync(root).find((n) => n.startsWith('card.leftover-'));
   assert.ok(aside, 'the old folder was kept');
   assert.equal(readFileSync(join(root, aside!, 'precious.txt'), 'utf8'), 'do not lose me');
 
-  assert.equal(await ensureWorktree(repo, dir, 'mh/one', 'main'), 'reused');
+  assert.equal(await ensureWorktree(repo, dir, 'ih/one', 'main'), 'reused');
 
   // The folder vanished but git still lists it.
   (await import('node:fs')).rmSync(dir, { recursive: true });
-  assert.equal(await ensureWorktree(repo, dir, 'mh/one', 'main'), 'created', 'pruned, then made again on the existing branch');
+  assert.equal(await ensureWorktree(repo, dir, 'ih/one', 'main'), 'created', 'pruned, then made again on the existing branch');
   assert.ok(existsSync(join(dir, 'README.md')));
 });
 
@@ -100,11 +100,11 @@ test('git refusing a repository owned by someone else is explained, not trusted 
   assert.equal(explainGitError(other, '/srv/x'), other, 'other errors pass through');
 });
 
-test('MH_WORKTREES_DIR moves where worktrees live', () => {
-  const root = mkdtempSync(join(tmpdir(), 'mh-root-'));
-  assert.equal(loadConfig(root, { PATH: process.env.PATH }).worktreesDir, join(root, '.meta-harness', 'worktrees'));
-  assert.equal(loadConfig(root, { PATH: process.env.PATH, MH_WORKTREES_DIR: '/srv/checkouts' }).worktreesDir, '/srv/checkouts');
-  assert.equal(loadConfig(root, { PATH: process.env.PATH, MH_WORKTREES_DIR: '~/checkouts' }).worktreesDir, join(homedir(), 'checkouts'));
+test('IH_WORKTREES_DIR moves where worktrees live', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ih-root-'));
+  assert.equal(loadConfig(root, { PATH: process.env.PATH }).worktreesDir, join(root, '.infinity-harness', 'worktrees'));
+  assert.equal(loadConfig(root, { PATH: process.env.PATH, IH_WORKTREES_DIR: '/srv/checkouts' }).worktreesDir, '/srv/checkouts');
+  assert.equal(loadConfig(root, { PATH: process.env.PATH, IH_WORKTREES_DIR: '~/checkouts' }).worktreesDir, join(homedir(), 'checkouts'));
 });
 
 test('a card run: setup happens before the agent starts, is logged on the card, and a failure is told to the agent and the humans', async () => {

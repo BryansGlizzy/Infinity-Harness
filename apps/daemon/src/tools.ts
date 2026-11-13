@@ -1,5 +1,5 @@
-import type { BoardMcp, Card, Settings, ToolGrant } from '@mh/core';
-import type { McpServerConfig } from '@mh/adapters';
+import type { BoardMcp, Card, Settings, ToolGrant } from '@ih/core';
+import type { McpServerConfig } from '@ih/adapters';
 
 // Extra MCP servers an agent session gets besides the board's own (master plan Phases 6.4 and 6.5): servers a human
 // approved for the whole board (`propose_mcp`), and tool grants given to this card (a browser for UI checks).

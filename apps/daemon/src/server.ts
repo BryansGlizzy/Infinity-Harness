@@ -5,17 +5,18 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
-import { ARTIFACT_KINDS, CARD_STATUSES, effectiveAgents, validateAgents, type ArtifactKind, type CardStatus, type ModelOption, type ReasoningOptions, type BoardMode, type RoutingRules, type Settings } from '@mh/core';
-import type { ContextService, SearchScope } from '@mh/context';
-import type { FastLane } from '@mh/fast-lane';
-import { priorFor } from '@mh/router';
-import { mergeSettings, type CardPatch, type Store } from '@mh/db';
-import type { RateLimiter } from '@mh/gateway';
+import { ARTIFACT_KINDS, CARD_STATUSES, effectiveAgents, validateAgents, type ArtifactKind, type CardStatus, type ModelOption, type ReasoningOptions, type BoardMode, type RoutingRules, type Settings } from '@ih/core';
+import type { ContextService, SearchScope } from '@ih/context';
+import type { FastLane } from '@ih/fast-lane';
+import { priorFor } from '@ih/router';
+import { mergeSettings, type CardPatch, type Store } from '@ih/db';
+import type { RateLimiter } from '@ih/gateway';
 import { checkRequest, type AuthOptions } from './auth.ts';
 import type { DaemonConfig } from './config.ts';
 import type { Live } from './live.ts';
 import { registerBoardMcp } from './board-mcp.ts';
 import { changesBetween, commitsBetween, diffBetween, fileAt, git, inspectRepo, removeWorktreeSafely, revParse, tryLocally } from './git.ts';
+import type { PoolHealth } from './health.ts';
 import type { Runner } from './runner.ts';
 import type { CouncilRunner } from './council.ts';
 import { expandPath, inspectFolder, prepareRepo, samePath, type RepoSetup } from './projects.ts';
@@ -28,6 +29,12 @@ import type { IdeBridge } from './ide.ts';
 import { buildMetrics } from './metrics.ts';
 import type { Refinery } from './refinery.ts';
 import { registerTelemetry } from './telemetry.ts';
+import { RemovalError, inspectRemoval, removeBoard } from './boards.ts';
+import { FilesError, listDir, readFileAt, rootFor } from './files.ts';
+import { registerFederationApi } from './federation/api.ts';
+import type { Federation } from './federation/service.ts';
+import { HarnessManager } from './harnesses.ts';
+import type { SystemHarnessId } from '@ih/client';
 
 /** The most events a reconnecting client is caught up with; a longer gap tells it to reload instead. */
 export const REPLAY_LIMIT = 5000;
@@ -76,12 +83,34 @@ export interface ServerDeps {
   budgets?: Budgets | null;
   approvals?: Approvals | null;
   bridge?: IdeBridge | null;
+  /** Swarm federation (Phase 7): the operator's routes for peers, shared projects and requests. */
+  federation?: Federation | null;
   /** Who may call the API. Absent: no checks (tests that are not about access). */
   auth?: AuthOptions | null;
+  /** Is each pool's model answering; pools taken out of rotation. */
+  health?: PoolHealth | null;
+  /** System harness discovery, installation, and authentication. */
+  harnesses?: HarnessManager | null;
 }
 
-export async function buildServer({ store, runner, config, live, limiter, scheduler, context, fastLane, council, refinery, budgets, approvals, bridge, auth }: ServerDeps): Promise<FastifyInstance> {
-  const app = Fastify({ logger: { level: process.env.MH_LOG_LEVEL ?? 'warn' } });
+const HARNESS_IDS: readonly SystemHarnessId[] = ['claude', 'codex', 'kimi', 'agy', 'opencode', 'gh'];
+function asHarnessId(raw: string): SystemHarnessId {
+  if ((HARNESS_IDS as readonly string[]).includes(raw)) return raw as SystemHarnessId;
+  throw new HttpError(404, `unknown harness: ${raw}`);
+}
+
+export async function buildServer({ store, runner, config, live, limiter, scheduler, context, fastLane, council, refinery, budgets, approvals, bridge, federation, auth, health, harnesses }: ServerDeps): Promise<FastifyInstance> {
+  const harnessMgr =
+    harnesses ??
+    new HarnessManager({
+      config,
+      onPoolsChanged: (pools) => {
+        for (const p of config.gateway.pools) limiter.configure(p.id, p.limits);
+        for (const p of pools) live.publish('pool.status', p.id, limiter.status(p.id));
+        scheduler?.kick();
+      },
+    });
+  const app = Fastify({ logger: { level: process.env.IH_LOG_LEVEL ?? 'warn' } });
   await app.register(websocket);
 
   if (auth) {
@@ -133,7 +162,8 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
     });
   });
 
-  registerBoardMcp(app, store, runner, { context, fastLane, approvals, bridge, docsDir: join(config.root, 'docs', 'agents') });
+  registerBoardMcp(app, store, runner, { context, fastLane, approvals, bridge, federation, docsDir: join(config.root, 'docs', 'agents') });
+  if (federation) registerFederationApi(app, federation);
   // OTLP/HTTP receiver for Claude Code's token and cost metrics (Phase 6.3).
   registerTelemetry(app, store);
 
@@ -176,10 +206,54 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
   });
 
   app.get('/api/health', async () => ({ ok: true, auth: auth?.requireToken ? 'token' : 'local' }));
+  // System harnesses: installed CLIs/bridges, login state, one-click install and OAuth/device sign-in.
+  app.get('/api/harnesses', async () => harnessMgr.list());
+  app.post<{ Params: { id: string } }>('/api/harnesses/:id/install', async (req) => {
+    const id = asHarnessId(req.params.id);
+    try {
+      return await harnessMgr.install(id);
+    } catch (err) {
+      throw new HttpError(409, (err as Error).message);
+    }
+  });
+  app.post<{ Params: { id: string }; Body: { apiKey?: string; mode?: string } }>('/api/harnesses/:id/login', async (req) => {
+    const id = asHarnessId(req.params.id);
+    try {
+      return await harnessMgr.login(id, req.body ?? {});
+    } catch (err) {
+      throw new HttpError(409, (err as Error).message);
+    }
+  });
+  app.post<{ Params: { id: string } }>('/api/harnesses/:id/login/cancel', async (req) => {
+    const id = asHarnessId(req.params.id);
+    harnessMgr.cancelLogin(id);
+    return { ok: true, harness: await harnessMgr.get(id) };
+  });
+  app.post<{ Body: { nimApiKey?: string; nimModel?: string; localBaseUrl?: string; localModel?: string } }>('/api/harnesses/env', async (req) => {
+    try {
+      return await harnessMgr.configureEnv(req.body ?? {});
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+  });
   // Pools with live limiter state (API windows, Claude 5h/7d, observed lockouts, forced usage) and session counts.
   app.get('/api/pools', async () =>
-    runner.pools().map((pool) => ({ ...pool, status: limiter.status(pool.id), running: runner.runningOn(pool.id) })),
+    runner.pools().map((pool) => ({ ...pool, status: limiter.status(pool.id), running: runner.runningOn(pool.id), ...(health ? { health: health.view(pool.id) } : {}) })),
   );
+  // Is the pool's model answering? Checks it now (an endpoint request, or starting the harness) and says so.
+  app.post<{ Params: { id: string } }>('/api/pools/:id/test', async (req) => {
+    if (!runner.pools().some((p) => p.id === req.params.id)) throw new HttpError(404, 'unknown pool');
+    if (!health) throw new HttpError(501, 'health checks are not available');
+    return health.check(req.params.id);
+  });
+  // A pool that was taken out of rotation because its endpoint stopped answering goes back in, on a person's word.
+  app.post<{ Params: { id: string } }>('/api/pools/:id/restore', async (req) => {
+    if (!runner.pools().some((p) => p.id === req.params.id)) throw new HttpError(404, 'unknown pool');
+    if (!health) throw new HttpError(501, 'health checks are not available');
+    health.restore(req.params.id);
+    scheduler?.kick();
+    return health.view(req.params.id);
+  });
   // Open sessions on every pool and board (the pools view).
   app.get('/api/sessions/active', async () => runner.activeSessions());
   // Operator override: force a pool's usage (e.g. 95 to halt it) to watch work flow elsewhere; pct null clears it.
@@ -234,6 +308,40 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
       return { ...store.createBoard({ name, repoPath, defaultBranch }), setup: did };
     } catch (err) {
       throw new HttpError(400, (err as Error).message);
+    }
+  });
+  // The project folder (or one card's worktree), read-only, for the file tree and viewer in the clients.
+  const filesGuard = async <T,>(fn: () => Promise<T> | T): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof FilesError) throw new HttpError(err.statusCode, err.message);
+      throw err;
+    }
+  };
+  app.get<{ Params: { id: string }; Querystring: { path?: string; card?: string } }>('/api/boards/:id/files', async (req) =>
+    filesGuard(() => listDir(rootFor(store, req.params.id, req.query.card), req.query.path ?? '')),
+  );
+  app.get<{ Params: { id: string }; Querystring: { path?: string; card?: string } }>('/api/boards/:id/file', async (req) =>
+    filesGuard(() => readFileAt(rootFor(store, req.params.id, req.query.card), req.query.path ?? '')),
+  );
+
+  // Removing a board: what it would touch, then either forget it (the folder stays) or also delete the folder from the disk.
+  // The second needs the board's name typed back and is refused for folders the daemon must never delete.
+  app.get<{ Params: { id: string } }>('/api/boards/:id/removal', async (req) => {
+    try {
+      return await inspectRemoval({ store, runner, config, federation }, req.params.id);
+    } catch (err) {
+      if (err instanceof RemovalError) throw new HttpError(err.statusCode, err.message);
+      throw err;
+    }
+  });
+  app.post<{ Params: { id: string }; Body: { mode?: string; confirmName?: string } }>('/api/boards/:id/remove', async (req) => {
+    try {
+      return await removeBoard({ store, runner, config, federation }, req.params.id, { mode: (req.body?.mode ?? '') as 'forget' | 'delete', confirmName: req.body?.confirmName });
+    } catch (err) {
+      if (err instanceof RemovalError) throw new HttpError(err.statusCode, err.message);
+      throw err;
     }
   });
   // Folder browser for the New board form: subfolders and what the folder is (git repo, files, empty, missing).
@@ -294,7 +402,8 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
     if (!scheduler) throw new HttpError(503, 'scheduler not running');
     try {
       const goal = required(req.body, 'goal');
-      const description = req.body?.description?.trim() ?? '';
+      // A prompt that names projects of other swarms (@beta/textkit) carries what they are, as data, so the planner knows.
+      const description = [req.body?.description?.trim() ?? '', federation?.mentionContext(`${goal}\n${req.body?.description ?? ''}`) ?? ''].filter(Boolean).join('\n\n');
       // Two or more enabled orchestrators with open pools plan the goal together (council.ts).
       // Not on direct boards: council verification resets each member's checkout, which there is the user's folder.
       if (council && store.getBoard(req.params.id)?.mode !== 'direct' && council.members(req.params.id).length >= 2) return await council.startGoal(req.params.id, goal, description);
@@ -328,6 +437,12 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
   app.patch<{ Params: { id: string }; Body: Partial<Settings> }>('/api/boards/:id/settings', async (req) => {
     if (!store.getBoard(req.params.id)) throw new HttpError(404, 'board not found');
     const patch = req.body ?? {};
+    if (patch.agentWeights !== undefined) {
+      const w = patch.agentWeights as unknown;
+      if (!w || typeof w !== 'object' || Array.isArray(w) || Object.values(w).some((v) => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 10)) {
+        throw new HttpError(400, 'agentWeights must map agent ids to numbers between 0 and 10');
+      }
+    }
     if (patch.agents) {
       // Checked with the implicit workers included, since delegation may name them.
       const next = mergeSettings(store.getSettings(req.params.id), patch);
@@ -384,13 +499,20 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
       boardId: card.boardId,
       fromActor: 'user:local',
       toCard: card.id,
-      body: body.replace(/^!urgent\s*/i, ''),
+      body: [body.replace(/^!urgent\s*/i, ''), federation?.mentionContext(body) ?? ''].filter(Boolean).join('\n\n'),
       urgent,
     });
     runner.deliver(card.id);
     return message;
   });
   app.get<{ Params: { id: string } }>('/api/boards/:id/messages', async (req) => store.boardMessages(req.params.id));
+  // Clear messages for the humans from the attention list: some by id, or all of the board's when no ids are given.
+  app.post<{ Params: { id: string }; Body: { ids?: string[] } }>('/api/boards/:id/messages/dismiss', async (req) => {
+    if (!store.getBoard(req.params.id)) throw new HttpError(404, 'board not found');
+    const ids = req.body?.ids;
+    if (ids !== undefined && (!Array.isArray(ids) || ids.some((i) => typeof i !== 'string'))) throw new HttpError(400, 'ids must be a list of message ids');
+    return { dismissed: store.dismissMessages(req.params.id, ids) };
+  });
   app.get<{ Params: { id: string } }>('/api/boards/:id/leases', async (req) => store.activeLeases(req.params.id));
 
   // --- a card's changes: the files its branch changed (or its landed merge changed), diffs and file contents

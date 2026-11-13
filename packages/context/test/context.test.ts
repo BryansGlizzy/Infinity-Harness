@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '@mh/db';
-import { FastLane } from '@mh/fast-lane';
+import { Store } from '@ih/db';
+import { FastLane } from '@ih/fast-lane';
 import { ContextService, Embedder, QUERY_PREFIX, cosine, ftsQuery } from '../src/index.ts';
 
 /** Bag-of-words vectors: texts sharing words (or listed synonyms) are similar. Counts calls; can be switched off. */

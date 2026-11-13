@@ -4,8 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import type { Card } from '@mh/core';
-import { AcpAgent, claudeArgs } from '@mh/adapters';
+import type { Card } from '@ih/core';
+import { AcpAgent, claudeArgs } from '@ih/adapters';
 import { Runner } from '../src/runner.ts';
 import { setup, status, waitFor } from './harness.ts';
 

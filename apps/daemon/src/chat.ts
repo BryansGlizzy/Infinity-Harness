@@ -1,5 +1,5 @@
-import type { Card, ChatItem, HarnessEvent, Message } from '@mh/core';
-import type { Store } from '@mh/db';
+import type { Card, ChatItem, HarnessEvent, Message } from '@ih/core';
+import type { Store } from '@ih/db';
 
 // A conversation view of a goal (master plan Phase 6.1): what the agents said, what the humans said back, and the
 // questions agents asked the human, across the goal's whole card tree, in time order. The VS Code chat view renders it.

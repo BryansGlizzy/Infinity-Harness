@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { remember, saved } from './storage.ts';
+import { useFollowBottom } from './useFollowBottom.ts';
 import {
   CARD_STATUSES,
   effectiveAgents,
@@ -13,8 +15,9 @@ import {
   type Outcome,
   type RoutingRules,
   type Settings,
-} from '@mh/core';
+} from '@ih/core';
 import { api, type ActiveSession, type Candidate, type CardChanges, type ModelCatalog, type PoolWithStatus, type SearchHit } from './api.ts';
+import { MentionInput } from './Mentions.tsx';
 import { ModelSelect } from './AgentsView.tsx';
 import { ROLE_LABEL, cardAgent } from './agentInfo.ts';
 import { STATUS_LABEL } from './BoardView.tsx';
@@ -505,15 +508,18 @@ const PHASE_TEXT: Record<string, string> = {
   failed: 'failed (no proposals)',
 };
 
+/** A tool call as shown: the call, its latest status, and what it printed. */
+type ToolCallView = Extract<HarnessEvent, { type: 'tool_call' }> & { output?: string; exitCode?: number };
+
 type LogItem =
   | { key: string; kind: 'event'; actor: string; ts: string; event: HarnessEvent }
   | { key: string; kind: 'lifecycle'; ts: string; text: string; tone?: 'ok' | 'bad' }
   | { key: string; kind: 'mail'; ts: string; message: Message; outgoing: boolean };
 
 /** Turns the card's event log into display rows, folding tool updates into their tool call. */
-function toLog(events: DaemonEvent[], cardId: string, name: (actor: string) => string): LogItem[] {
+export function toLog(events: DaemonEvent[], cardId: string, name: (actor: string) => string): LogItem[] {
   const items: LogItem[] = [];
-  const tools = new Map<string, Extract<HarnessEvent, { type: 'tool_call' }>>();
+  const tools = new Map<string, ToolCallView>();
   for (const e of events) {
     if (e.type === 'session.started') {
       const s = e.payload as { model: string };
@@ -580,8 +586,16 @@ function toLog(events: DaemonEvent[], cardId: string, name: (actor: string) => s
         }
         continue;
       }
+      if (event.type === 'tool_output') {
+        const call = tools.get(event.id);
+        if (call) {
+          call.output = (call.output ?? '') + event.text;
+          if (event.exitCode !== undefined) call.exitCode = event.exitCode;
+        }
+        continue;
+      }
       if (event.type === 'tool_call') {
-        const copy = { ...event };
+        const copy: ToolCallView = { ...event };
         tools.set(event.id, copy);
         items.push({ key: `${e.seq}`, kind: 'event', actor: e.actor, ts: e.ts, event: copy });
         continue;
@@ -594,7 +608,7 @@ function toLog(events: DaemonEvent[], cardId: string, name: (actor: string) => s
 
 const time = (ts: string) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-function Row({ item, name }: { item: LogItem; name: (actor: string) => string }) {
+export function Row({ item, name }: { item: LogItem; name: (actor: string) => string }) {
   if (item.kind === 'lifecycle') return <li className={`log lifecycle ${item.tone ?? ''}`}><span className="ts">{time(item.ts)}</span>{item.text}</li>;
   if (item.kind === 'mail') {
     const m = item.message;
@@ -626,14 +640,26 @@ function Row({ item, name }: { item: LogItem; name: (actor: string) => string })
           </details>
         </li>
       );
-    case 'tool_call':
+    case 'tool_call': {
+      const call = e as ToolCallView;
+      const out = call.output?.replace(/\n+$/, '') ?? '';
+      const lines = out ? out.split('\n').length : 0;
+      const failed = call.exitCode !== undefined && call.exitCode !== 0;
       return (
         <li className="log tool">
           <span className="ts">{time(item.ts)}</span>
-          <span className={`badge ${e.status}`}>{e.status}</span> <strong>{e.kind}</strong> {e.title}
-          {e.locations.length > 0 && <span className="muted"> · {e.locations.join(', ')}</span>}
+          <span className={`badge ${call.status}`}>{call.status}</span> <strong>{call.kind}</strong> {call.title}
+          {call.exitCode !== undefined && <span className={`badge ${failed ? 'rejected' : 'allowed'}`}>exit {call.exitCode}</span>}
+          {call.locations.length > 0 && <span className="muted"> · {call.locations.join(', ')}</span>}
+          {out && (
+            <details className="tool-out" open={lines <= 8 || call.status === 'in_progress'}>
+              <summary className="muted">output · {lines} line{lines === 1 ? '' : 's'}</summary>
+              <pre>{out}</pre>
+            </details>
+          )}
         </li>
       );
+    }
     case 'permission':
       return (
         <li className="log permission">
@@ -648,6 +674,8 @@ function Row({ item, name }: { item: LogItem; name: (actor: string) => string })
           <ul>{e.entries.map((p, i) => <li key={i} className={p.status}>{p.content}</li>)}</ul>
         </li>
       );
+    case 'notice':
+      return <li className="log lifecycle warn"><span className="ts">{time(item.ts)}</span>{e.text}</li>;
     case 'turn_end':
       return <li className="log lifecycle"><span className="ts">{time(item.ts)}</span>Turn ended · {e.stopReason}</li>;
     case 'error':
@@ -679,14 +707,14 @@ function Composer({ card, onError }: { card: Card; onError: (m: string) => void 
 
   return (
     <form className="composer" onSubmit={submit}>
-      <textarea
+      <MentionInput
+        multiline
         value={body}
-        onChange={(e) => setBody(e.target.value)}
-        placeholder="Message this card's agent (delivered at its next turn; start with !urgent to interrupt)"
+        onChange={setBody}
+        ariaLabel="Message to this card's agent"
+        placeholder="Message this card's agent (delivered at its next turn; start with !urgent to interrupt; @ names another swarm's project)"
         rows={2}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void submit(e);
-        }}
+        onSubmit={() => void submit({ preventDefault() {} } as FormEvent)}
       />
       <div className="row">
         <label className="check">
@@ -747,9 +775,16 @@ export function CardPanel(props: {
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<'activity' | 'changes' | 'context' | 'terminal'>('activity');
   const [hasTerminal, setHasTerminal] = useState(false);
-  const logEnd = useRef<HTMLLIElement>(null);
+  // Facts and routing are long; folded by default they leave the room to the activity list (open by choice, remembered).
+  const [detailsOpen, setDetailsOpen] = useState(() => saved('ih.card.details') === '1');
+  const rememberDetails = (open: boolean) => {
+    setDetailsOpen(open);
+    remember('ih.card.details', open ? '1' : '0');
+  };
   const running = card.status === 'in_progress';
   const items = toLog(props.events, card.id, name);
+  // Follows new output only while you are at the bottom of the list (see useFollowBottom).
+  const follow = useFollowBottom<HTMLOListElement>(props.events.length, `${card.id}:${view}`);
   // The latest state of each outcome: recorded, then possibly weighed by a human.
   const outcomeById = new Map<number, Outcome>();
   for (const e of props.events) if (e.type === 'card.outcome' || e.type === 'outcome.reviewed') outcomeById.set((e.payload as Outcome).id, e.payload as Outcome);
@@ -762,9 +797,6 @@ export function CardPanel(props: {
     setAgentId(a?.id ?? '');
     setModel(a?.model ?? '');
   }, [card.id, card.agentId, agents.length]);
-  useEffect(() => {
-    void logEnd.current?.scrollIntoView({ block: 'end' });
-  }, [items.length]);
   // Re-check for a live terminal whenever a session starts or ends.
   const sessionMarks = props.events.filter((e) => e.type === 'session.started' || e.type === 'session.ended').length;
   useEffect(() => {
@@ -803,6 +835,8 @@ export function CardPanel(props: {
       {card.narration && <p className="narration">{card.narration}</p>}
       {card.description && <p className="desc">{card.description}</p>}
 
+      <details className="card-details" open={detailsOpen} onToggle={(e) => rememberDetails((e.currentTarget as HTMLDetailsElement).open)}>
+        <summary>Details, routing and rules</summary>
       <dl className="facts">
         <dt>Status</dt>
         <dd>
@@ -881,6 +915,18 @@ export function CardPanel(props: {
             </dd>
           </>
         )}
+        {card.pipeline.finalSummary && (
+          <>
+            <dt>Final summary</dt>
+            <dd><button className="link" onClick={() => props.onSelect(card.pipeline.finalSummary!.cardId)}>Open the report</button></dd>
+          </>
+        )}
+        {card.pipeline.summaryOf && (
+          <>
+            <dt>Summarizes</dt>
+            <dd><button className="link" onClick={() => props.onSelect(card.pipeline.summaryOf!)}>{props.cards.find((c) => c.id === card.pipeline.summaryOf)?.title ?? card.pipeline.summaryOf}</button></dd>
+          </>
+        )}
         {card.parentId && (
           <>
             <dt>Parent</dt>
@@ -897,6 +943,8 @@ export function CardPanel(props: {
         onSelect={props.onSelect}
         onError={props.onError}
       />
+
+      </details>
 
       <ReviewControls card={card} settings={props.settings} onError={props.onError} />
 
@@ -953,11 +1001,13 @@ export function CardPanel(props: {
       ) : view === 'context' ? (
         <ContextView card={card} events={props.events} onError={props.onError} />
       ) : (
-      <ol className="activity">
-        {items.length === 0 && <li className="muted">No activity yet.</li>}
-        {items.map((item) => <Row key={item.key} item={item} name={name} />)}
-        <li ref={logEnd} aria-hidden />
-      </ol>
+      <div className="activity-wrap">
+        <ol className="activity" ref={follow.ref} onScroll={follow.onScroll}>
+          {items.length === 0 && <li className="muted">No activity yet.</li>}
+          {items.map((item) => <Row key={item.key} item={item} name={name} />)}
+        </ol>
+        {follow.behind && <button className="jump-latest" onClick={follow.jump}>↓ New activity</button>}
+      </div>
       )}
       <Composer card={card} onError={props.onError} />
     </aside>

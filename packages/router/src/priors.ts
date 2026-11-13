@@ -1,4 +1,4 @@
-import { SKILLS, type PriorOverride, type Skill } from '@mh/core';
+import { SKILLS, type PriorOverride, type Skill } from '@ih/core';
 
 /** What routing expects of an agent before it has outcomes: per skill, up to a complexity it handles well. */
 export interface Prior {

@@ -107,7 +107,7 @@ export async function commitAll(dir: string, message: string): Promise<string | 
   const staged = await git(dir, ['diff', '--cached', '--name-only']);
   if (!staged) return null;
   const hasIdentity = await git(dir, ['config', 'user.email']).then(Boolean, () => false);
-  const identity = hasIdentity ? [] : ['-c', 'user.name=meta-harness', '-c', 'user.email=meta-harness@localhost'];
+  const identity = hasIdentity ? [] : ['-c', 'user.name=infinity-harness', '-c', 'user.email=infinity-harness@localhost'];
   await git(dir, [...identity, 'commit', '-q', '-m', message]);
   return git(dir, ['rev-parse', 'HEAD']);
 }
@@ -118,7 +118,7 @@ export async function commitAll(dir: string, message: string): Promise<string | 
  */
 export async function mergeBranches(dir: string, branches: string[]): Promise<{ merged: string[]; conflicted: string[] }> {
   const hasIdentity = await git(dir, ['config', 'user.email']).then(Boolean, () => false);
-  const identity = hasIdentity ? [] : ['-c', 'user.name=meta-harness', '-c', 'user.email=meta-harness@localhost'];
+  const identity = hasIdentity ? [] : ['-c', 'user.name=infinity-harness', '-c', 'user.email=infinity-harness@localhost'];
   const merged: string[] = [];
   const conflicted: string[] = [];
   for (const branch of branches) {
@@ -147,7 +147,7 @@ export async function commitsAhead(repo: string, base: string, branch: string): 
 }
 
 const identityArgs = async (dir: string) =>
-  (await git(dir, ['config', 'user.email']).then(Boolean, () => false)) ? [] : ['-c', 'user.name=meta-harness', '-c', 'user.email=meta-harness@localhost'];
+  (await git(dir, ['config', 'user.email']).then(Boolean, () => false)) ? [] : ['-c', 'user.name=infinity-harness', '-c', 'user.email=infinity-harness@localhost'];
 
 /** The `origin` remote's URL, or null when there is none. */
 export async function originUrl(repo: string): Promise<string | null> {
@@ -364,7 +364,7 @@ export async function tryLocally(repo: string, mode: 'checkout' | 'apply', ref: 
   }
   const patch = await git(repo, ['diff', '--binary', '--no-color', `${base}...${ref}`]);
   if (!patch) return { summary: 'The card changed nothing against the base branch.' };
-  const file = join(await mkdtemp(join(tmpdir(), 'mh-patch-')), 'card.patch');
+  const file = join(await mkdtemp(join(tmpdir(), 'ih-patch-')), 'card.patch');
   await writeFile(file, `${patch}\n`);
   try {
     await git(repo, ['apply', '--whitespace=nowarn', file]);

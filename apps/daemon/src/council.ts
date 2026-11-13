@@ -6,10 +6,10 @@
 //   verifying → each member cross-checks another member's share against the goal; it may add fix-up cards
 //   fixing    → fix-up cards land, then another verification round (up to councilVerifyRounds)
 //   done
-import type { Card, Council, CouncilShare, DaemonEvent } from '@mh/core';
-import type { Store } from '@mh/db';
-import type { KevClient } from '@mh/router';
-import type { ContextService } from '@mh/context';
+import type { Card, Council, CouncilShare, DaemonEvent } from '@ih/core';
+import type { Store } from '@ih/db';
+import type { KevClient } from '@ih/router';
+import type { ContextService } from '@ih/context';
 import { lastAgentMessage } from './context.ts';
 import { git } from './git.ts';
 import { parseVerdict } from './refinery.ts';
@@ -96,7 +96,7 @@ export function planningPrompt(goal: Card, council: Council, shares: CouncilShar
     '',
     others.length ? `The other shares (do not plan these):\n${others.map((s) => `- ${s.member} (card ${card(s.member)}): ${s.scope}`).join('\n')}` : '',
     '',
-    `Create the cards for your share with create_subtask under your card ${me.cardId}: clear titles, context, acceptance criteria, blocked_by where one card needs another. Where your share meets another, agree on the interface: record it with put_artifact (kind contract) and tell that member's card with post_message.`,
+    `Create the cards for your share with create_subtask under your card ${me.cardId}: clear titles, context, acceptance criteria. Cut your share so its cards can run side by side (own files each, agreed interfaces instead of waiting): blocked_by only where a card cannot start without another's code or output. Where your share meets another, agree on the interface: record it with put_artifact (kind contract) and tell that member's card with post_message.`,
     'When your cards are on the board, end your turn with a short summary of them.',
   ].join('\n');
 }

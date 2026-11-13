@@ -1,15 +1,16 @@
 import { join } from 'node:path';
-import { outcomeValue, type Board, type Card, type HarnessEvent, type OutcomeResult, type Pipeline, type Settings, type DaemonEvent } from '@mh/core';
-import type { ContextService } from '@mh/context';
-import type { KevClient } from '@mh/router';
+import { outcomeValue, type Board, type Card, type HarnessEvent, type OutcomeResult, type Pipeline, type Settings, type DaemonEvent } from '@ih/core';
+import type { ContextService } from '@ih/context';
+import type { KevClient } from '@ih/router';
 import { buildHandoff, currentArtifact } from './context.ts';
-import type { Store } from '@mh/db';
-import { commitMessageJob, readCommitMessage, readTriage, trimInput, triageJob, type FastLane } from '@mh/fast-lane';
+import type { Store } from '@ih/db';
+import { commitMessageJob, readCommitMessage, readTriage, trimInput, triageJob, type FastLane } from '@ih/fast-lane';
 import type { DaemonConfig } from './config.ts';
 import { advanceBranch, branchDiff, changedFiles, git, mergeBase, originUrl, pushBranch, revParse, runTests, landingCommit } from './git.ts';
 import { ghCli, isGitHubRemote, type GitHub } from './github.ts';
 import { heldByOthers } from './leases.ts';
 import { LOCKOUT_PATTERN, type Runner } from './runner.ts';
+import { PROVIDER_DOWN_PATTERN } from './health.ts';
 import type { Scheduler } from './scheduler.ts';
 import type { Approvals } from './approvals.ts';
 
@@ -521,9 +522,11 @@ export class Refinery {
     // The runner logs a report_blocked as "Blocked: <reason>"; a human weighs those instead of counting a failure.
     const blocked = lastError?.startsWith('Blocked: ') ? lastError.slice(9) : null;
     if (blocked) this.recordBlocked(card, blocked);
-    if (retries >= settings.maxRetries) return this.escalate(card, `the run failed ${retries + 1} time(s)${lastError ? `: ${lastError.slice(0, 200)}` : ''}`, !blocked);
+    // A provider that could not be reached says nothing about the model, any more than a quota lockout does.
+    const providerDown = !blocked && !!lastError && PROVIDER_DOWN_PATTERN.test(lastError);
+    if (retries >= settings.maxRetries) return this.escalate(card, `the run failed ${retries + 1} time(s)${lastError ? `: ${lastError.slice(0, 200)}` : ''}`, !blocked && !providerDown);
     // A quota or rate-limit lockout says nothing about the model's ability.
-    if (!blocked && !(lastError && LOCKOUT_PATTERN.test(lastError))) this.recordFailure(card, 'failed_run');
+    if (!blocked && !providerDown && !(lastError && LOCKOUT_PATTERN.test(lastError))) this.recordFailure(card, 'failed_run');
     const board = store.getBoard(card.boardId)!;
     this.reassign({ ...card, pipeline: { ...card.pipeline, retries: retries + 1 } }, 'the previous run failed', lastError ? `Last error: ${lastError.slice(0, 1000)}` : '', board.defaultBranch);
   }

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { AgentProfile, DaemonEvent, HarnessEvent, Settings } from '@mh/core';
-import type { Store } from '@mh/db';
-import { FastLane } from '@mh/fast-lane';
-import { KevClient } from '@mh/router';
+import type { AgentProfile, DaemonEvent, HarnessEvent, Settings } from '@ih/core';
+import type { Store } from '@ih/db';
+import { FastLane } from '@ih/fast-lane';
+import { KevClient } from '@ih/router';
 import { setup, waitFor } from './harness.ts';
 
 const agent = (id: string, poolId: string, model = ''): AgentProfile => ({ id, poolId, model, role: 'worker', delegatesTo: [], enabled: true });

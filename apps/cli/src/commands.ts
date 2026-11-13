@@ -1,7 +1,7 @@
-import { EventStream, isLive, loadNeeds, type StreamMessage } from '@mh/client';
-import { CARD_STATUSES, type Board, type Card, type CardStatus } from '@mh/core';
-import { attachTerminal, DETACH_HINT } from '@mh/client/node';
-import { runTui } from '@mh/tui';
+import { EventStream, isLive, loadNeeds, type StreamMessage } from '@ih/client';
+import { CARD_STATUSES, type Board, type Card, type CardStatus } from '@ih/core';
+import { attachTerminal, DETACH_HINT } from '@ih/client/node';
+import { runTui } from '@ih/tui';
 import { connect, resolveBoard, resolveCard, splitRef, type Flags, type Target } from './context.ts';
 import { ago, pct, table } from './format.ts';
 import { UsageError, type Io } from './io.ts';
@@ -24,6 +24,10 @@ export interface Command {
   options?: Record<string, { type: 'string' | 'boolean'; short?: string; hint?: string }>;
   run(ctx: Ctx): Promise<void>;
 }
+
+/** Whether a pool's model is answering, in a word. */
+const healthText = (p: { health?: { reachable: string; latencyMs: number | null; ejected: unknown } }) =>
+  !p.health ? '' : p.health.ejected ? 'OUT of rotation' : p.health.reachable === 'online' ? `online${p.health.latencyMs !== null ? ` ${p.health.latencyMs}ms` : ''}` : p.health.reachable === 'offline' ? 'no response' : '-';
 
 const str = (v: string | boolean | undefined) => (typeof v === 'string' ? v : undefined);
 const need = (ctx: Ctx, n: number, what: string) => {
@@ -74,12 +78,12 @@ export const COMMANDS: Command[] = [
     async run(ctx) {
       await withTarget(ctx, async (t) => {
         const [health, boards, pools] = await Promise.all([t.api.health(), t.api.boards(), t.api.pools()]);
-        ctx.print({ machine: t.label, url: t.api.baseUrl, ...health, boards, pools: pools.map((p) => ({ id: p.id, label: p.label, state: p.status.state, running: p.running, windows: p.status.windows })) }, () =>
+        ctx.print({ machine: t.label, url: t.api.baseUrl, ...health, boards, pools: pools.map((p) => ({ id: p.id, label: p.label, state: p.status.state, health: p.health, running: p.running, windows: p.status.windows })) }, () =>
           [
             `${t.label}: ${t.api.baseUrl} (api access: ${health.auth === 'token' ? 'token required' : 'local callers need none'})`,
             '',
             table(boards.map((b) => [b.id, b.name, b.mode, b.repoPath]), ['BOARD', 'NAME', 'MODE', 'REPO']),
-            table(pools.map((p) => [p.id, p.status.state, `${p.running} running`, p.status.windows.map((w) => `${w.window} ${pct(w.pct)}`).join(' ')]), ['POOL', 'STATE', 'SESSIONS', 'WINDOWS']),
+            table(pools.map((p) => [p.id, p.status.state, healthText(p), `${p.running} running`, p.status.windows.map((w) => `${w.window} ${pct(w.pct)}`).join(' ')]), ['POOL', 'STATE', 'MODEL', 'SESSIONS', 'WINDOWS']),
           ].join('\n'),
         );
       });
@@ -337,7 +341,69 @@ export const COMMANDS: Command[] = [
     async run(ctx) {
       await withTarget(ctx, async (t) => {
         const pools = await t.api.pools();
-        ctx.print(pools, () => table(pools.map((p) => [p.id, p.status.state, `${p.running} running`, p.status.windows.map((w) => `${w.window} ${pct(w.pct)}`).join('  ')]), ['POOL', 'STATE', 'SESSIONS', 'WINDOWS']));
+        ctx.print(pools, () => table(pools.map((p) => [p.id, p.status.state, healthText(p), `${p.running} running`, p.status.windows.map((w) => `${w.window} ${pct(w.pct)}`).join('  ')]), ['POOL', 'STATE', 'MODEL', 'SESSIONS', 'WINDOWS']));
+      });
+    },
+  },
+  {
+    name: 'pool',
+    usage: 'ih pool test <pool> | ih pool restore <pool>',
+    summary: "Check now whether a pool's model answers, or put a pool that was taken out of rotation (its endpoint stopped answering) back in",
+    async run(ctx) {
+      const [sub, id] = ctx.args;
+      if ((sub !== 'test' && sub !== 'restore') || !id) throw new UsageError('ih pool test <pool> | ih pool restore <pool>');
+      await withTarget(ctx, async (t) => {
+        const view = await (sub === 'test' ? t.api.testPool(id) : t.api.restorePool(id));
+        ctx.print(view, () =>
+          sub === 'restore'
+            ? `${id} is back in rotation (${view.reachable === 'online' ? 'answering' : view.reachable === 'offline' ? `but not answering right now: ${view.detail ?? 'no response'}` : 'not checked yet'}).\n`
+            : `${id}: ${view.reachable === 'online' ? `online${view.latencyMs !== null ? ` in ${view.latencyMs} ms` : ''}${view.detail ? ` (${view.detail})` : ''}` : `no response${view.detail ? ` (${view.detail})` : ''}`}${view.ejected ? `\nout of rotation since ${view.ejected.since}: ${view.ejected.reason}\nput it back with: ih pool restore ${id}` : ''}\n`,
+        );
+      });
+    },
+  },
+  {
+    name: 'messages',
+    usage: 'ih messages [clear [MESSAGE ID...]]',
+    summary: 'Messages agents left for you; clear some (or all) once you have read them. They stay in the card\'s log',
+    async run(ctx) {
+      const [sub, ...ids] = ctx.args;
+      if (sub !== undefined && sub !== 'clear') throw new UsageError('ih messages [clear [MESSAGE ID...]]');
+      await withTarget(ctx, async (t) => {
+        const board = await resolveBoard(t.api, ctx.flags.board, ctx.io);
+        if (sub === 'clear') {
+          const r = await t.api.dismissMessages(board.id, ids.length ? ids : undefined);
+          return ctx.print(r, () => `cleared ${r.dismissed.length} message${r.dismissed.length === 1 ? '' : 's'}\n`);
+        }
+        const open = (await t.api.messages(board.id)).filter((m) => m.toCard === null && !m.fromActor.startsWith('user:') && !m.dismissedAt);
+        ctx.print(open, () => (open.length ? table(open.map((m) => [m.id, m.fromActor.replace(/^card:/, 'card '), m.body.split('\n')[0]!, ago(m.createdAt)]), ['ID', 'FROM', 'MESSAGE', 'WHEN'], 90) : 'No messages for you.\n'));
+      });
+    },
+  },
+  {
+    name: 'weight',
+    usage: 'ih weight [AGENT [N | reset]]',
+    summary: 'Tilt automatic routing: show the weights, or set one (1 is neutral, above favours, below holds back, 0 keeps cards off the agent)',
+    async run(ctx) {
+      await withTarget(ctx, async (t) => {
+        const board = await resolveBoard(t.api, ctx.flags.board, ctx.io);
+        const settings = await t.api.settings(board.id);
+        const weights = settings.agentWeights ?? {};
+        const [agent, value] = ctx.args;
+        if (agent && value !== undefined) {
+          if (!settings.agents.some((a) => a.id === agent) && !(await t.api.priors(board.id)).some((a) => a.agentId === agent)) throw new UsageError(`no agent called ${agent} (see: ih weight)`);
+          const { [agent]: _, ...rest } = weights;
+          const n = value === 'reset' ? 1 : Number(value);
+          if (!Number.isFinite(n) || n < 0 || n > 10) throw new UsageError('the weight is a number from 0 to 10, or "reset"');
+          const next = (await t.api.updateSettings(board.id, { agentWeights: n === 1 ? rest : { ...rest, [agent]: n } })).agentWeights ?? {};
+          ctx.print(next, () => `${agent}: weight ${next[agent] ?? 1}`);
+          return;
+        }
+        const rows = (await t.api.priors(board.id)).filter((a) => a.role !== 'orchestrator');
+        const shown = agent ? rows.filter((a) => a.agentId === agent) : rows;
+        ctx.print(Object.fromEntries(shown.map((a) => [a.agentId, weights[a.agentId] ?? 1])), () =>
+          table(shown.map((a) => [a.agentId, `${a.poolId}/${a.model || '-'}`, String(weights[a.agentId] ?? 1)]), ['AGENT', 'MODEL', 'WEIGHT']),
+        );
       });
     },
   },

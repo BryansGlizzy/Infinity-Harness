@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Card, Settings } from '@mh/core';
+import type { Card, Settings } from '@ih/core';
 import { api } from './api.ts';
 
 /**

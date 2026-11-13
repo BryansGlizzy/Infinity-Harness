@@ -1,11 +1,11 @@
 {
-  "name": "@mh/tui",
+  "name": "@ih/tui",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
-    "@mh/client": "workspace:*",
-    "@mh/core": "workspace:*"
+    "@ih/client": "workspace:*",
+    "@ih/core": "workspace:*"
   }
 }

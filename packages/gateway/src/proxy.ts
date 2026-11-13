@@ -33,7 +33,7 @@ export interface Gateway {
   close(): Promise<void>;
 }
 
-const USER_AGENT = 'meta-harness/0.1'; // Groq's Cloudflare rejects requests without a normal User-Agent
+const USER_AGENT = 'infinity-harness/0.1'; // Groq's Cloudflare rejects requests without a normal User-Agent
 const DROP_RESPONSE_HEADERS = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection']);
 const DEFAULT_LOCK_MS = 30_000;
 
