@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setup } from '../../daemon/test/harness.ts';
 import { fakeSsh } from '../../../packages/client/test/fake-ssh.ts';
 import { run } from '../src/cli.ts';
@@ -332,6 +333,89 @@ test('weight: shows and sets the routing weight per agent, rejects nonsense, and
     assert.equal(res.status, 400);
     assert.deepEqual((await ih(['weight', agent, 'reset'])).json(), {});
     assert.equal(t.store.getSettings(t.board.id).agentWeights[agent], undefined);
+  } finally {
+    await t.close();
+  }
+});
+
+test('ih mcp: list the library, switch a server on for the board, set an agent\'s access, start and stop it', async () => {
+  const t = await setup();
+  const { ih } = harness(t);
+  try {
+    const fake = fileURLToPath(new URL('../../daemon/test/fake-mcp-server.mjs', import.meta.url));
+    t.mcp.save({ id: 'fake', label: 'Fake Studio', description: 'd', transport: 'stdio', command: process.execPath, args: [fake], hosting: 'shared', exclusive: false, toolKinds: {}, autoStart: false });
+    const list = (await ih(['mcp'])).json();
+    assert.deepEqual(list.servers.map((s: any) => s.entry.id).sort(), ['fake', 'rbxsync', 'roblox-studio']);
+    assert.deepEqual(list.enabled, []);
+    assert.match((await ih(['mcp'], { tty: true })).out, /fake\s+off\s+stopped/);
+
+    const on = await ih(['mcp', 'on', 'fake']);
+    assert.equal(on.code, 0);
+    assert.deepEqual(on.json().enabled, ['fake']);
+    assert.equal((await ih(['mcp'])).json().servers.find((s: any) => s.entry.id === 'fake').state, 'running', 'switching it on starts it');
+    assert.equal((await ih(['mcp', 'access', 'fake', 'fa', 'read'])).json().access.fake.agents.fa, 'read');
+    assert.equal((await ih(['mcp', 'access', 'fake', 'default', 'off'])).json().access.fake.default, 'off');
+    assert.equal((await ih(['mcp', 'access', 'fake', 'fa', 'sideways'])).code, 2);
+    assert.equal((await ih(['mcp', 'on', 'nope'])).code, 2, 'only servers in the library');
+    assert.equal((await ih(['mcp', 'stop', 'fake'])).json().state, 'stopped');
+    assert.deepEqual((await ih(['mcp', 'off', 'fake'])).json().enabled, []);
+  } finally {
+    await t.close();
+  }
+});
+
+test('ih addon: list, switch on for a direct board (the sync starts in its folder), refuse a worktree board, switch off', async () => {
+  const t = await setup();
+  const { ih } = harness(t);
+  try {
+    const { createServer } = await import('node:http');
+    const port = await new Promise<number>((resolve) => {
+      const s = createServer().listen(0, '127.0.0.1', () => {
+        const p = (s.address() as { port: number }).port;
+        s.close(() => resolve(p));
+      });
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'ih-cli-addon-'));
+    const here = (f: string) => fileURLToPath(new URL(`../../daemon/test/${f}`, import.meta.url));
+    t.addons.register({
+      id: 'fakeworld', label: 'Fake World', description: 'd', servers: [], boardModes: ['direct'],
+      service: { id: 'fake-sync', label: 'Fake sync', command: process.execPath, args: [here('fake-sync-service.mjs'), String(port)], port, healthPath: '/health' },
+    });
+    const board = t.store.createBoard({ name: 'Game', repoPath: dir, defaultBranch: '', mode: 'direct' });
+
+    const list = await ih(['addon', '--board', board.id]);
+    assert.equal(list.json()[0].enabled, false, 'off by default');
+    const on = await ih(['addon', 'on', 'fakeworld', '--board', board.id]);
+    assert.equal(on.code, 0, on.err);
+    assert.equal(on.json().components.find((c: any) => c.id === 'fake-sync').state, 'running');
+    assert.match((await ih(['addon', '--board', board.id], { tty: true })).out, /fakeworld\s+on/);
+    const wt = await ih(['addon', 'on', 'fakeworld', '--board', t.board.id]);
+    assert.equal(wt.code, 1, 'a worktree board is refused');
+    assert.match(wt.err, /direct boards/);
+    assert.equal((await ih(['addon', 'sideways'])).code, 2);
+    assert.equal((await ih(['addon', 'on'])).code, 2);
+    assert.equal((await ih(['addon', 'off', 'fakeworld', '--board', board.id])).json().enabled, false);
+    assert.equal(t.addons.serviceInfo('fake-sync'), null, 'switching off stops the process');
+  } finally {
+    await t.close();
+  }
+});
+
+test('ih report: per-card effort, flags what looks wasteful, and filters to one card', async () => {
+  const t = await setup();
+  const { ih } = harness(t);
+  try {
+    const card = t.store.createCard({ boardId: t.board.id, title: 'Chatty worker' });
+    for (let i = 0; i < 9; i++) t.store.append('session.event', card.id, { sessionId: 's', event: { type: 'tool_call', id: `t${i}`, title: 'ps aux | grep roblox' } }, 'x');
+    const all = (await ih(['report'])).json();
+    const row = all.cards.find((c: any) => c.id === card.id);
+    assert.equal(row.steps, 9);
+    assert.match(row.flags.join(' '), /9 shell commands that look like diagnosing/);
+    assert.equal(all.totals.diagnosticShell, 9);
+    assert.equal((await ih(['report', 'chatty'])).json().cards.length, 1, 'a word from the title picks the card');
+    const human = await ih(['report'], { tty: true });
+    assert.match(human.out, /Chatty worker/);
+    assert.match(human.out, /diagnosing the machine/);
   } finally {
     await t.close();
   }

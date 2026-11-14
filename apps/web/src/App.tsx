@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { effectiveAgents, type Mention, type Approval, type Board, type Card, type DaemonEvent, type Dependency, type FedRequest, type Lease, type LiveMessage, type Message, type Outcome, type Settings } from '@ih/core';
+import { effectiveAgents, type Mention, type AddonView, type Approval, type Board, type Card, type DaemonEvent, type Dependency, type FedRequest, type Lease, type LiveMessage, type Message, type Outcome, type Settings } from '@ih/core';
 import { api, type ActiveSession, type FederationOverview, type ModelCatalog, type PoolStatus, type PoolWithStatus } from './api.ts';
 import { AgentsView } from './AgentsView.tsx';
 import { MetricsView } from './MetricsView.tsx';
@@ -19,6 +19,8 @@ import { FileTree, type OpenFile } from './FileTree.tsx';
 import { FileViewer } from './FileViewer.tsx';
 import { MentionInput, MentionsContext } from './Mentions.tsx';
 import { SettingsPanel } from './SettingsPanel.tsx';
+import { McpView } from './McpView.tsx';
+import { applyAddonView, linkSummaries } from './addonLink.ts';
 import { TreeView } from './TreeView.tsx';
 
 const BOARD_KEY = 'ih.board';
@@ -30,6 +32,7 @@ const VIEWS = [
   { id: 'pools', label: 'Pools' },
   { id: 'metrics', label: 'Metrics' },
   { id: 'swarms', label: 'Swarms' },
+  { id: 'mcp', label: 'MCP' },
 ] as const;
 type View = (typeof VIEWS)[number]['id'];
 
@@ -93,6 +96,8 @@ export function App() {
   /** A board was just created: Settings opens with a short "set up your agents" intro. */
   const [welcome, setWelcome] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  // Add-ons' links (Roblox: Studio's plugins and the sync): loaded per board, then kept current by the daemon's pushes.
+  const [addons, setAddons] = useState<AddonView[]>([]);
   const [models, setModels] = useState<ModelCatalog>({});
   const [error, setError] = useState<string | null>(null);
   // Swarm federation (Phase 7): peers, shared projects, requests; swarm-wide, not per board.
@@ -183,6 +188,7 @@ export function App() {
   const onEvent = useCallback(
     (msg: DaemonEvent | LiveMessage) => {
       if ('live' in msg) {
+        if (msg.type === 'addon.status' && msg.subject === boardId) setAddons((list) => applyAddonView(list, msg.payload as AddonView));
         if (msg.type === 'pool.status') {
           const status = msg.payload as PoolStatus;
           setPools((list) => list.map((p) => (p.id === status.poolId ? { ...p, status } : p)));
@@ -246,6 +252,16 @@ export function App() {
     [boardId, selected, refreshPools, refreshFederation],
   );
   const connected = useEventStream(onEvent);
+  // Read again for a new board, and after the live connection comes back (pushes sent while it was down are not replayed).
+  useEffect(() => {
+    if (!boardId) return;
+    let current = true;
+    api.addons(boardId).then((a) => current && setAddons(a), () => {});
+    return () => {
+      current = false;
+      setAddons([]);
+    };
+  }, [boardId, connected]);
 
   // A card and a file share the right-hand side: opening one closes the other.
   useEffect(() => {
@@ -389,7 +405,7 @@ export function App() {
         </div>
       )}
 
-      {board && <StatusStrip pools={pools} leases={leases} cards={cards} humanMessages={humanMessages} pendingOutcomes={pendingOutcomes} approvals={approvals} swarmWaiting={federation ? federation.needs.knocks.length + federation.needs.requests.length : 0} onOpenSwarms={() => switchView('swarms')} onOpenAgents={() => { setSettingsOpen(false); switchView('agents'); }} onOpenSettings={showSettings} onDismiss={dismissMessages} onSelect={showCard} onError={setError} />}
+      {board && <StatusStrip pools={pools} leases={leases} cards={cards} humanMessages={humanMessages} pendingOutcomes={pendingOutcomes} approvals={approvals} links={linkSummaries(addons)} linksStale={!connected} onOpenMcp={() => { setSettingsOpen(false); switchView('mcp'); }} swarmWaiting={federation ? federation.needs.knocks.length + federation.needs.requests.length : 0} onOpenSwarms={() => switchView('swarms')} onOpenAgents={() => { setSettingsOpen(false); switchView('agents'); }} onOpenSettings={showSettings} onDismiss={dismissMessages} onSelect={showCard} onError={setError} />}
 
       {creatingBoard && (
         boards.length > 0 ? (
@@ -470,6 +486,18 @@ export function App() {
         )}
         {board && view === 'metrics' && <MetricsView boardId={board.id} onSelect={setSelected} onError={setError} />}
         {board && view === 'swarms' && <SwarmsView overview={federation} requests={peerRequests} onRefresh={refreshFederation} onError={setError} />}
+        {board && view === 'mcp' && (
+          <McpView
+            boardId={board.id}
+            boardName={board.name}
+            settings={settings}
+            pools={pools}
+            onSettings={setSettings}
+            onOpenLibrary={() => showSettings('mcp')}
+            onOpenAgents={() => switchView('agents')}
+            onError={setError}
+          />
+        )}
         {!board && !creatingBoard && (
           <div className="empty-state page">
             <h3>No board open</h3>

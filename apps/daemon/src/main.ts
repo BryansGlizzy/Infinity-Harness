@@ -15,7 +15,9 @@ import { IdeBridge } from './ide.ts';
 import { shellInstaller } from './installer.ts';
 import { startCapture } from './context.ts';
 import { CouncilRunner } from './council.ts';
-import { loadConfig } from './config.ts';
+import { findBinary, loadConfig } from './config.ts';
+import { McpHub } from './mcp-hub.ts';
+import { Addons } from './addons.ts';
 import { repairMovedWorktrees } from './legacy.ts';
 import { Live } from './live.ts';
 import { Refinery } from './refinery.ts';
@@ -60,7 +62,11 @@ const gateway = await startGateway({
 let federation: Federation | null = null;
 // Pool health (is the model answering); built just after the runner, which it asks to probe harnesses.
 let health: PoolHealth | null = null;
+// The MCP hub (Phase 9): shared servers run once here and agents reach them through /hub.
+const mcp = new McpHub(store, { root: config.root, env: config.agentEnv, port: config.port, live, isInstalled: (c) => !!findBinary(c, config.agentEnv) });
+const addons = new Addons({ store, hub: mcp, env: config.agentEnv, live });
 const runner = new Runner(store, config, {
+  addons,
   onClaudeRateLimits: (rl) =>
     limiter.report('claude', [
       ...(rl.fiveHour ? [{ window: '5h' as const, pct: rl.fiveHour.usedPct, resetsAt: rl.fiveHour.resetsAt }] : []),
@@ -72,6 +78,7 @@ const runner = new Runner(store, config, {
   caps: (boardId) => store.getSettings(boardId),
   telemetryEndpoint: `http://127.0.0.1:${config.port}`,
   peerLines: () => federation?.promptLines() ?? [],
+  mcp,
 });
 soleSession = (poolId) => runner.soleSession(poolId);
 health = new PoolHealth({
@@ -139,8 +146,8 @@ if (recovered.sessions || recovered.requeued.length || recovered.blocked.length)
 }
 const approvals = new Approvals({ store, runner, fastLane, installer: shellInstaller(config.agentEnv) });
 const bridge = new IdeBridge();
-const scheduler = new Scheduler({ store, runner, limiter, pools: config.pools, kev, fastLane, budgets, approvals, health, hold: (card) => federation?.holdReason(card) ?? null });
-const finalSummary = new FinalSummary({ store, context, startTask: (boardId, title, description, prompt) => scheduler.startTask(boardId, title, description, prompt) });
+const scheduler = new Scheduler({ store, runner, limiter, pools: config.pools, kev, fastLane, budgets, approvals, health, hold: (card) => federation?.holdReason(card) ?? null, gate: (card) => addons.holdReason(card) });
+const finalSummary = new FinalSummary({ store, context, runner });
 finalSummary.start();
 const bestOf = new BestOf({ store, runner, scheduler, kev });
 scheduler.setBestOf(bestOf);
@@ -180,10 +187,15 @@ if (fedApp) {
 }
 const apiTokenFile = join(config.dataDir, 'api-token');
 const auth = authOptionsFromEnv(loadApiToken(apiTokenFile), config.host);
-const app = await buildServer({ store, runner, config, live, limiter, scheduler, context, fastLane, council, refinery, budgets, approvals, bridge, federation, auth, health });
+const app = await buildServer({ store, runner, config, live, limiter, scheduler, context, fastLane, council, refinery, budgets, approvals, bridge, federation, auth, health, mcp, addons });
 
 await app.listen({ host: config.host, port: config.port });
 health.start();
+// Servers that start with the daemon (Roblox Studio's bridge must be up before the plugin can connect).
+mcp.autoStart();
+// Add-ons that were on when the daemon stopped start their helper processes again, in their boards' folders.
+void addons.reconcile();
+addons.startPolling();
 // Probe each harness for its models in the background, so the UI's model pickers are ready when opened.
 for (const pool of config.pools) runner.models(pool.id).catch((err: Error) => console.warn(`models for ${pool.id}: ${err.message}`));
 console.log(`infinity-harness daemon on http://${config.host}:${config.port}`);
@@ -210,6 +222,8 @@ async function shutdown() {
   stopCapture();
   clearInterval(backfill);
   runner.shutdown();
+  await addons.close();
+  await mcp.close();
   await app.close();
   await gateway.close();
   store.close();

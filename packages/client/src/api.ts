@@ -1,5 +1,5 @@
 // The daemon's REST API, one typed method per endpoint. Methods are arrow properties so they survive being passed around.
-import type { Approval, Artifact, BoardRemovalInfo, DirListing, FileContent, Mention, BoardRemovalMode, BoardRemovalResult, DrafterMode, PeerCaps, FedRequest, FederationNeeds, FederationSettings, Peer, PeerProject, ProjectCard, RequestBudget, RequestResolution, SharedProject, Visibility, ArtifactKind, Board, Card, CardStatus, ChatItem, DaemonEvent, Dependency, Lease, Message, Outcome, Pool, RoutingRules, Session, Settings } from '@ih/core';
+import type { AddonView, EfficiencyReport, Approval, Artifact, BoardMcpView, McpLibraryEntry, McpServerView, BoardRemovalInfo, DirListing, FileContent, Mention, BoardRemovalMode, BoardRemovalResult, DrafterMode, PeerCaps, FedRequest, FederationNeeds, FederationSettings, Peer, PeerProject, ProjectCard, RequestBudget, RequestResolution, SharedProject, Visibility, ArtifactKind, Board, Card, CardStatus, ChatItem, DaemonEvent, Dependency, Lease, Message, Outcome, Pool, RoutingRules, Session, Settings } from '@ih/core';
 import { DaemonHttp } from './http.ts';
 import type { FederationOverview, PeerDetail, PeerHit, PeerPreview, ActiveSession, AgentPrior, Candidate, CardChanges, FolderInfo, HarnessLoginFlow, MetricsReport, ModelCatalog, PoolHealthView, PoolHistoryData, PoolStatus, PoolWithStatus, RepoSetup, ReviewComment, SearchHit, SystemHarnessId, SystemHarnessStatus, UsageSummary } from './types.ts';
 
@@ -123,6 +123,18 @@ export class DaemonApi {
   approvals = (boardId: string, status: Approval['status'] = 'pending') => this.call<Approval[]>('GET', `/api/boards/${boardId}/approvals?status=${status}`);
   decide = (id: string, decision: 'approve' | 'deny', note?: string) => this.call<Approval>('POST', `/api/approvals/${id}/decide`, { decision, note });
   tools = (boardId: string) => this.call<{ name: string; command: string; installed: boolean; installable: boolean }[]>('GET', `/api/boards/${boardId}/tools`);
+  // MCP hub (Phase 9): the machine's library of servers, and a board's view of it.
+  mcpServers = () => this.call<McpServerView[]>('GET', '/api/mcp');
+  mcpAdd = (entry: McpLibraryEntry) => this.call<McpServerView>('POST', '/api/mcp', entry);
+  mcpSave = (id: string, entry: McpLibraryEntry) => this.call<McpServerView>('PUT', `/api/mcp/${encodeURIComponent(id)}`, entry);
+  mcpRemove = (id: string) => this.call<{ ok: boolean }>('DELETE', `/api/mcp/${encodeURIComponent(id)}`);
+  mcpAction = (id: string, action: 'start' | 'stop' | 'restart' | 'refresh') => this.call<McpServerView>('POST', `/api/mcp/${encodeURIComponent(id)}/${action}`, undefined, 120_000);
+  mcpInstall = (id: string) => this.call<{ ok: boolean; output: string; server: McpServerView }>('POST', `/api/mcp/${encodeURIComponent(id)}/install`, undefined, INSTALL_TIMEOUT_MS);
+  addons = (boardId: string) => this.call<AddonView[]>('GET', `/api/boards/${boardId}/addons`);
+  addonEnable = (boardId: string, id: string, move = false) => this.call<AddonView>('POST', `/api/boards/${boardId}/addons/${encodeURIComponent(id)}/enable`, { move }, INSTALL_TIMEOUT_MS);
+  addonDisable = (boardId: string, id: string) => this.call<AddonView>('POST', `/api/boards/${boardId}/addons/${encodeURIComponent(id)}/disable`);
+  efficiency = (boardId: string) => this.call<EfficiencyReport>('GET', `/api/boards/${boardId}/efficiency`);
+  boardMcp = (boardId: string) => this.call<BoardMcpView>('GET', `/api/boards/${boardId}/mcp`);
   installTool = (boardId: string, grant: string) => this.call<{ ok: boolean; output: string; installed: boolean }>('POST', `/api/boards/${boardId}/tools/${grant}/install`, undefined, INSTALL_TIMEOUT_MS);
 
   // --- system harnesses (discovery, install, sign-in, .env config)

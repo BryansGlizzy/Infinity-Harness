@@ -30,6 +30,7 @@ import {
   type EventType,
   type Lease,
   type BoardMode,
+  type McpLibraryEntry,
   type Message,
   type Session,
   type SessionState,
@@ -236,6 +237,8 @@ const MIGRATIONS = [
   `ALTER TABLE messages ADD COLUMN dismissed_at TEXT;`,
   // A pool whose endpoint stopped answering is taken out of rotation until a person puts it back.
   `CREATE TABLE pool_ejections (pool_id TEXT PRIMARY KEY, since TEXT NOT NULL, reason TEXT NOT NULL);`,
+  // The MCP library (Phase 9): servers installed or linked once per machine. One JSON document per server.
+  `CREATE TABLE mcp_library (id TEXT PRIMARY KEY, entry_json TEXT NOT NULL, updated_at TEXT NOT NULL);`,
 ];
 
 type Row = Record<string, string | number | null>;
@@ -270,9 +273,15 @@ export function mergeSettings(base: Settings, patch: LegacySettings): Settings {
       role: a.role,
       delegatesTo: a.delegatesTo ?? [],
       enabled: a.enabled !== false,
+      ...(a.notes?.length ? { notes: a.notes.map((n) => n.trim()).filter(Boolean) } : {}),
     })),
     poolSlots: { ...base.poolSlots, ...patch.poolSlots },
     scarcity: { ...base.scarcity, ...patch.scarcity },
+    mcp: {
+      enabled: patch.mcp?.enabled ?? base.mcp.enabled,
+      access: patch.mcp?.access ?? base.mcp.access,
+      presets: patch.mcp?.presets ?? base.mcp.presets,
+    },
     permissions: {
       orchestrator: { ...base.permissions.orchestrator, ...patch.permissions?.orchestrator },
       lead: { ...base.permissions.lead, ...patch.permissions?.lead },
@@ -1033,6 +1042,35 @@ export class Store {
     return this.mutate(() => {
       if (!this.db.prepare('DELETE FROM pool_ejections WHERE pool_id = ? RETURNING 1').get(poolId)) return false;
       this.append('pool.restored', poolId, { poolId }, 'user:local');
+      return true;
+    });
+  }
+
+  // --- MCP library (Phase 9)
+
+  listMcpLibrary(): McpLibraryEntry[] {
+    return (this.db.prepare('SELECT entry_json FROM mcp_library ORDER BY id').all() as Row[]).map((r) => JSON.parse(String(r.entry_json)) as McpLibraryEntry);
+  }
+
+  getMcpEntry(id: string): McpLibraryEntry | undefined {
+    const r = this.db.prepare('SELECT entry_json FROM mcp_library WHERE id = ?').get(id) as Row | undefined;
+    return r ? (JSON.parse(String(r.entry_json)) as McpLibraryEntry) : undefined;
+  }
+
+  saveMcpEntry(entry: McpLibraryEntry, by = 'user:local'): void {
+    this.mutate(() => {
+      const existed = !!this.db.prepare('SELECT 1 FROM mcp_library WHERE id = ?').get(entry.id);
+      this.db
+        .prepare('INSERT INTO mcp_library (id, entry_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET entry_json = excluded.entry_json, updated_at = excluded.updated_at')
+        .run(entry.id, JSON.stringify(entry), new Date().toISOString());
+      this.append(existed ? 'mcp.updated' : 'mcp.added', entry.id, { id: entry.id, label: entry.label }, by);
+    });
+  }
+
+  deleteMcpEntry(id: string, by = 'user:local'): boolean {
+    return this.mutate(() => {
+      if (!this.db.prepare('DELETE FROM mcp_library WHERE id = ? RETURNING 1').get(id)) return false;
+      this.append('mcp.removed', id, { id }, by);
       return true;
     });
   }

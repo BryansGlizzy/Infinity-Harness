@@ -2124,3 +2124,57 @@ pre.diff .meta { color: var(--muted); }
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .comms-dot { display: none; }
 }
+
+/* --- MCP tab, MCP library, agent notes (Phase 9) */
+.mcp-page .mcp-presets { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 14px; }
+.mcp-servers { display: grid; gap: 12px; margin-bottom: 18px; }
+.mcp-card { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.mcp-card.on { border-color: var(--accent, var(--border-strong, var(--border))); }
+.mcp-card h4 { margin: 8px 0 2px; font-size: 13px; }
+.mcp-card-head { gap: 8px; flex-wrap: wrap; }
+.mcp-card p { margin: 0; }
+.mcp-state.running { color: var(--ok); border-color: var(--ok); }
+.mcp-state.error { color: var(--bad); border-color: var(--bad); }
+.mcp-state.warn, .mcp-state.starting { color: var(--warn); border-color: var(--warn); }
+.mcp-matrix, .mcp-grants { display: grid; gap: 2px; }
+.mcp-grants { padding: 8px 12px; }
+.mcp-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; }
+.mcp-row select.overridden { border-color: var(--accent, var(--warn)); }
+.mcp-tools-box { margin-top: 4px; }
+.mcp-tools-box summary { cursor: pointer; color: var(--muted, inherit); font-size: 12.5px; }
+.mcp-tools { list-style: none; margin: 6px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 2px 14px; }
+.mcp-tools li { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+.mcp-tools .kind { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: inherit; }
+.mcp-tools .kind.read { color: var(--ok); border-color: var(--ok); }
+.mcp-tools .kind.write { color: var(--warn); border-color: var(--warn); }
+.mcp-tools button.kind { cursor: pointer; }
+.mcp-tools .kind.overridden { border-style: dashed; }
+.mcp-log { max-height: 160px; overflow: auto; font-size: 11.5px; white-space: pre-wrap; margin: 6px 0 0; }
+.mcp-form { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; margin: 10px 0; }
+.agent-notes { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 2px; }
+.note-chip { display: inline-flex; align-items: center; gap: 2px; padding: 1px 4px 1px 9px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; }
+.note-chip .icon-btn { padding: 0 4px; font-size: 10px; }
+.note-input { width: 110px; font-size: 12px; padding: 2px 8px; }
+
+.mcp-addons { display: grid; gap: 10px; margin: 4px 0 18px; }
+.mcp-addons h3 { margin: 0; }
+.mcp-card.addon.on { border-color: var(--ok); }
+.addon-parts { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
+.addon-parts li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+
+.mcp-tools li.hidden-tool { opacity: 0.55; }
+.mcp-tools li button.kind { cursor: pointer; margin-right: 6px; }
+.pools-table tr.has-flags td:first-child { border-left: 2px solid var(--warn); }
+
+/* Add-on links in the status strip (Roblox: Studio and RbxSync) */
+.chip.link { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.chip.link .link-icon { flex: none; }
+.chip.link.ok { color: var(--ok); border-color: var(--ok); }
+.chip.link.bad { color: var(--bad); border-color: var(--bad); }
+.chip.link.unknown { color: var(--muted, inherit); }
+.chip.link.stale { opacity: 0.55; }
+.chip.link > span:not(.part) { color: var(--text, inherit); font-weight: 600; }
+.chip.link .part { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text, inherit); }
+.chip.link .part .dot { width: 6.5px; height: 6.5px; border-radius: 50%; background: var(--muted, #999); }
+.chip.link .part.ok .dot { background: var(--ok); }
+.chip.link .part.bad .dot { background: var(--bad); }

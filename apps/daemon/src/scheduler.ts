@@ -1,4 +1,4 @@
-import { effectiveAgents, type AgentProfile, type Card, type DaemonEvent, type HarnessEvent, type Pool, type Settings } from '@ih/core';
+import { boardNotes, effectiveAgents, type AgentProfile, type Card, type DaemonEvent, type HarnessEvent, type Pool, type Settings } from '@ih/core';
 import type { Store } from '@ih/db';
 import type { RateLimiter } from '@ih/gateway';
 import { cleanNarration, narratorJob, readLint, specLintJob, type FastLane } from '@ih/fast-lane';
@@ -61,6 +61,8 @@ export interface SchedulerDeps {
   bestOf?: { intercept(card: Card): boolean; siblingAgents(card: Card): string[] } | null;
   /** Why a ready card must not start now (it waits for another swarm, or a request's budget is used up), or null. */
   hold?: (card: Card) => string | null;
+  /** A worker card that needs an add-on whose outside half is down (Studio not connected): held, and the person told once. */
+  gate?: (card: Card) => string | null;
   /** Pools taken out of rotation because their endpoint stopped answering. */
   health?: { ejection(poolId: string): { since: string; reason: string } | null } | null;
   tickMs?: number;
@@ -175,7 +177,13 @@ export class Scheduler {
     if (!card || card.classification) return;
     this.classifying.add(cardId);
     const parent = card.parentId ? store.getCard(card.parentId) : undefined;
-    const input = { title: card.title, description: card.description, workType: card.workType, parentTitle: parent?.title };
+    const input = {
+      title: card.title,
+      description: card.description,
+      workType: card.workType,
+      parentTitle: parent?.title,
+      notes: boardNotes(effectiveAgents(store.getSettings(card.boardId), this.deps.pools)),
+    };
     try {
       let classification = fallbackClassification(input);
       if (kev) {
@@ -274,6 +282,15 @@ export class Scheduler {
     });
   }
 
+  /** Cards held by an add-on gate, and what they were told, so each hold is said once. */
+  private gated = new Map<string, string>();
+
+  private noteGate(card: Card, reason: string) {
+    if (this.gated.get(card.id) === reason) return;
+    this.gated.set(card.id, reason);
+    this.deps.store.postMessage({ boardId: card.boardId, fromActor: 'daemon:gate', toCard: null, body: `"${card.title}" (${card.id}) is waiting, not started: ${reason} It starts by itself once that is fixed.`, urgent: false });
+  }
+
   tick() {
     const { store, runner } = this.deps;
     for (const board of store.listBoards()) {
@@ -295,6 +312,12 @@ export class Scheduler {
         if (runner.isActive(card.id) || this.launching.has(card.id)) continue;
         // Waiting for another swarm's answer, or for a request's budget to be raised (federation, Phase 7).
         if (this.deps.hold?.(card)) continue;
+        const gated = this.deps.gate?.(card) ?? null;
+        if (gated) {
+          this.noteGate(card, gated);
+          continue;
+        }
+        this.gated.delete(card.id);
         if (store.blockers(card.id).some((b) => !this.settled(byId.get(b.id) ?? b, cards))) continue;
         if (!card.classification) {
           void this.classify(card.id);

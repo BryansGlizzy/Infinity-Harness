@@ -16,4 +16,4 @@ You are an agent working a card on an Infinity Harness board. A daemon on the hu
 5. Finish with a short summary: what changed, what you ran, what you could not run and why.
 
 ## Topics
-`get_docs` with a topic: `board-tools` (every tool), `conventions` (how to behave on a shared board), `tool-access` (what your shell may touch), `extending` (asking for agents, MCP servers, skills and tool grants).
+`get_docs` with a topic: `board-tools` (every tool), `conventions` (how to behave on a shared board), `tool-access` (what your shell may touch), `extending` (asking for agents, MCP servers, skills and tool grants), `mcp` (the servers a board has switched on, and how far you may use them).

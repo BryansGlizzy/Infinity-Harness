@@ -87,8 +87,16 @@ export function ToolsTab(props: { boardId: string; settings: Settings; save: (pa
       />
 
       <Toggle
+        label="Hold cards while an add-on's other half is down"
+        hint="A card that needs an add-on's servers (Roblox: Studio and RbxSync connected) waits in Ready, and you are told once, while that half is known to be down. Otherwise agents find out step by step, probing the machine and burning tokens. It starts by itself once things are connected."
+        checked={settings.addonGate}
+        def={D.addonGate}
+        onChange={(v) => save({ addonGate: v })}
+      />
+
+      <Toggle
         label="Final summary when a goal is done"
-        hint="When every card of a goal is done, the orchestrator reads what was built and writes a final report: what was done, how to run and verify it, decisions, open issues, and the documentation that applies. It appears as its own card, is saved on the goal under Context, and is posted to Messages for you."
+        hint="When the last card of a goal is done, the orchestrator that planned it gets one more turn in its own conversation and writes a report from what its cards reported: what was done, how to run and verify it, decisions, open issues, and the documentation they mention. It does not go back through the project. The report is that card's last message, is saved on the goal under Context, and is posted to Messages for you. If the orchestrator's session has closed, the same card runs again with the cards' reports in its prompt."
         checked={settings.finalSummary}
         def={D.finalSummary}
         onChange={(v) => save({ finalSummary: v })}

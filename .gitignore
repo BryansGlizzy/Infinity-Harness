@@ -11,6 +11,10 @@ dist/
 # Third-party projects cloned for study (not part of this repo)
 research/
 
+# Third-party MCP servers cloned or installed locally (hosted by the harness, not part of this repo); only the notes about them are kept
+mcp/*
+!mcp/README.md
+
 # Local state, secrets, caches and build artifacts
 .pytest_cache/
 __pycache__/

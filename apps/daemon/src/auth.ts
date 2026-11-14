@@ -33,7 +33,7 @@ export type Surface =
 
 export function surfaceOf(path: string): Surface {
   if (path === '/api/health' || path === '/hooks/claude') return 'open';
-  if (path === '/mcp' || path.startsWith('/mcp/') || path.startsWith('/v1/')) return 'agent';
+  if (path === '/mcp' || path.startsWith('/mcp/') || path.startsWith('/hub/') || path.startsWith('/v1/')) return 'agent';
   if (path.startsWith('/api/') || path === '/ws' || path.startsWith('/ws/')) return 'operator';
   return 'open';
 }

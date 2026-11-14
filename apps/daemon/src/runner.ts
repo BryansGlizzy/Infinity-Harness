@@ -43,6 +43,8 @@ import { WorktreeSetup, setupFailureNote } from './setup.ts';
 import { heldByOthers, toRepoPath } from './leases.ts';
 import { priorNotes } from './context.ts';
 import { findBinary } from './config.ts';
+import type { McpHub } from './mcp-hub.ts';
+import type { Addons } from './addons.ts';
 import { extraMcpServers, grantsSection, missingGrantText, skillsSection, splitInstalled } from './tools.ts';
 
 export interface ActiveSessionInfo {
@@ -74,6 +76,10 @@ interface ActiveRun {
   token: string;
   state: 'starting' | 'busy' | 'idle';
   cancelled: boolean;
+  /** Who stopped the run and why, and whether the card goes back to Ready (a person's stop keeps it stopped). */
+  cancelBy?: string;
+  cancelReason?: string;
+  requeue: boolean;
   /** An urgent message interrupted the current turn; deliver it instead of resuming. */
   interrupted: boolean;
   blockedReason: string | null;
@@ -119,10 +125,11 @@ const MAX_RESUMES = 3;
 const MAX_MESSAGE_TURNS = 5;
 
 /** Sent to an agent whose conversation survived a daemon restart. */
-export function resumedPrompt(direct: boolean): string {
-  return `The daemon that runs this board restarted while you were working, and your session was picked up where it stopped. Anything you were in the middle of was cut off. ${
-    direct ? 'Check the files the task names' : 'Check `git status` and `git log` in your worktree'
-  } to see what is already done, then carry on and finish the task.`;
+export function resumedPrompt(direct: boolean, why: 'restart' | 'stopped' = 'restart'): string {
+  const where = `${direct ? 'Check the files the task names' : 'Check `git status` and `git log` in your worktree'} to see what is already done, then carry on and finish the task.`;
+  return why === 'stopped'
+    ? `A person stopped you and has now started you again; your earlier conversation is picked up where it stopped, and anything you were in the middle of was cut off. Whatever made them stop you (often something outside the repository, like Studio, being down) may be fixed now. ${where} If the same thing still fails, do not investigate the machine: call ask_parent once, then report_blocked.`
+    : `The daemon that runs this board restarted while you were working, and your session was picked up where it stopped. Anything you were in the middle of was cut off. ${where}`;
 }
 
 export function resumePrompt(rejected: string[], worktree: string): string {
@@ -174,11 +181,12 @@ export function buildOrchestratorPrompt(
   caps: { maxChildren: number; maxDepth: number; /** How many cards the board can work on at once. */ parallel?: number },
   team: TeamMember[] = [],
   peers: string[] = [],
+  mcp: string[] = [],
 ): string {
   const lead = card.role === 'lead';
   const parallel = caps.parallel ?? 0;
   const leads = team.filter((t) => t.agent.role === 'lead');
-  const describe = (t: TeamMember) => `- ${t.agent.id}: ${t.pool.label}, ${t.agent.model || t.pool.model}${t.agent.role === 'lead' ? ' (lead: breaks a chunk down further)' : ''}`;
+  const describe = (t: TeamMember) => `- ${t.agent.id}: ${t.pool.label}, ${t.agent.model || t.pool.model}${t.agent.role === 'lead' ? ' (lead: breaks a chunk down further)' : ''}${t.agent.notes?.length ? ` [${t.agent.notes.join(', ')}]` : ''}`;
   return [
     lead
       ? `You are a lead agent on the "${board.name}" board. The orchestrator gave you a large chunk of work to break down. Your card id is ${card.id}.`
@@ -192,6 +200,18 @@ export function buildOrchestratorPrompt(
     '',
     `Split the ${lead ? 'chunk' : 'goal'} into ${lead ? 'cards under your card' : 'cards'} with the \`board\` MCP server. They are picked up automatically and worked in parallel, each in its own git worktree${team.length ? ', by these agents:' : '.'}`,
     ...team.map(describe),
+    '',
+    ...(team.some((t) => t.agent.notes?.length)
+      ? ['', 'The notes in brackets say what an agent is for. When a card fits one, pass prefers="<note>" to create_subtask so it goes to that agent (a preference, not a rule: quota and track record still count).']
+      : []),
+    ...(mcp.length
+      ? [
+          '',
+          'MCP servers switched on for this board (tools that act outside the repo). Only the agents named can use each one:',
+          ...mcp,
+          'A card that needs one of them must say so: pass needs_mcp=["<id>"] to create_subtask, and only agents allowed to use it will take the card. Do not plan work that needs a server that is not listed.',
+        ]
+      : []),
     '',
     '- create_subtask once per card: a short imperative title; a description with the context and files involved; acceptance_criteria a reviewer can check; work_type (feature, bugfix, refactor, test, docs or research).',
     '- Workers have a shell with the machine\'s toolchains. Name the commands that verify a card (build, tests, linters) in its acceptance criteria, so the worker runs them.',
@@ -215,6 +235,7 @@ export function buildOrchestratorPrompt(
     '',
     `- Keep cards small enough for one agent session. At most ${caps.maxChildren} cards under one parent; the tree may be ${caps.maxDepth} levels deep.`,
     '- list_cards shows the board. If a card bounces back to you for a weak spec, fix it with update_subtask.',
+    '- A worker that is stuck may ask you with ask_parent. Answer briefly with post_message, or fix the plan (update_subtask, a new card). If the problem is outside the board (a machine, an app that is down), tell the human with post_message to="human".',
     '- Record decisions and interfaces that several cards must agree on with put_artifact (kind decision or contract); workers find them with search_context. search_context also shows what earlier cards on this board decided.',
     ...(peers.length
       ? [
@@ -243,7 +264,7 @@ export function buildPrompt(
   board: Board,
   worktree: string,
   notes: Pick<Artifact, 'id' | 'kind' | 'title' | 'summary'>[] = [],
-  env: { testCommand?: string; shareToolchains?: boolean; settings?: Pick<Settings, 'grants' | 'skills'> } = {},
+  env: { testCommand?: string; shareToolchains?: boolean; settings?: Pick<Settings, 'grants' | 'skills'>; mcp?: string[]; guide?: string[] } = {},
 ): string {
   const where =
     board.mode === 'direct'
@@ -267,7 +288,10 @@ export function buildPrompt(
     '- If you cannot continue, call write_handoff (state, decisions, blockers, files, next steps) and then report_blocked with the reason.',
     '- get_docs explains the board tools, conventions, tool access, and how to ask for an MCP server, a skill or a tool grant.',
     ...environmentSection(env),
+    '',
+    'When you are stuck: if the same thing fails twice, or something outside your worktree (a tool, a server, an app) is broken, do not spend steps diagnosing the machine. Call ask_parent once with what you tried and what you need (the agent that planned you can answer, change your card or tell the human), carry on with what you can, and use report_blocked if you cannot finish. Asking early is cheaper than a long search.',
     ...(env.settings ? [...grantsSection(env.settings, card), ...skillsSection(env.settings.skills)] : []),
+    ...(env.mcp?.length ? ['', 'MCP servers you may use (their tools are in your tool list under the server name; the board decides how far you may use each):', ...env.mcp, ...(env.guide ?? [])] : []),
     ...notesSection(notes),
     '',
     'When you are done, reply with a short summary of what you changed.',
@@ -292,6 +316,10 @@ export interface RunnerOptions {
   caps?: (boardId: string) => { maxChildren: number; maxDepth: number; stallMinutes?: number };
   /** Lines naming the projects connected swarms maintain, for planners' prompts (federation, Phase 7). */
   peerLines?: () => string[];
+  /** The MCP hub (Phase 9): shared servers agents reach through the daemon, and what prompts say about them. */
+  mcp?: McpHub;
+  /** Add-ons (Phase 9): what their guides tell agents. */
+  addons?: Pick<Addons, 'guideLines'>;
 }
 
 /** Error text that means the pool is out of quota or rate-limited, not that the task failed. */
@@ -655,6 +683,7 @@ export class Runner {
       token: randomBytes(18).toString('hex'),
       state: 'starting',
       cancelled: false,
+      requeue: true,
       interrupted: false,
       blockedReason: null,
       rejected: [],
@@ -673,12 +702,32 @@ export class Runner {
   }
 
   /** Stops the card's agent: interrupts a running turn, or closes an idle session. */
-  async cancel(cardId: string): Promise<void> {
+  /**
+   * Stops a card's run. `requeue` (the default, for the daemon's own cancels) sends the card back to Ready to run again; a person's
+   * stop (`requeue: false`) leaves it stopped, with its conversation noted so that Run picks it up where it stopped.
+   */
+  async cancel(cardId: string, opts: { by?: string; reason?: string; requeue?: boolean } = {}): Promise<void> {
     const run = this.active.get(cardId);
     if (!run) return;
     run.cancelled = true;
-    if (run.state === 'idle') this.close(cardId, 'ended');
-    else await run.agent?.cancel();
+    run.cancelBy = opts.by ?? 'daemon';
+    run.cancelReason = opts.reason;
+    run.requeue = opts.requeue ?? true;
+    if (run.state === 'idle') {
+      this.store.append('card.cancelled', cardId, { by: run.cancelBy, reason: run.cancelReason ?? '', requeue: run.requeue, state: 'idle', sessionId: run.session.id }, run.cancelBy);
+      this.close(cardId, 'ended');
+    } else await run.agent?.cancel();
+  }
+
+  /**
+   * Gives a parked (idle) session one more turn with exactly this prompt, in its own conversation: it already holds everything it
+   * was told. False when the card has no idle session, in which case nothing happened.
+   */
+  promptIdle(cardId: string, prompt: string): boolean {
+    const run = this.active.get(cardId);
+    if (!run || run.cancelled || run.state !== 'idle') return false;
+    void this.work(run, prompt);
+    return true;
   }
 
   /** Marks the card blocked when its current turn ends (board MCP `report_blocked`). */
@@ -809,6 +858,10 @@ export class Runner {
     return { sessions: sessions.length, requeued, blocked };
   }
 
+  private lastInterruptReason(card: Card): string | undefined {
+    return (this.store.eventsFor(card.id).filter((e) => e.type === 'session.interrupted').at(-1)?.payload as { reason?: string } | undefined)?.reason;
+  }
+
   /** The conversation to pick up again: this card's latest session that the restart cut off, on the same pool. */
   private interruptedSession(card: Card, poolId: string, currentSession: string): string | undefined {
     const events = this.store.eventsFor(card.id).filter((e) => e.type === 'session.interrupted');
@@ -843,6 +896,7 @@ export class Runner {
             headers: [{ name: 'Authorization', value: `Bearer ${run.token}` }],
           },
           ...extraMcpServers(this.store.getSettings(run.board.id), usableCard, worktree),
+          ...(this.opts.mcp?.sessionServers(this.store.getSettings(run.board.id), this.store.getCard(run.cardId) ?? card, worktree, run.token) ?? []),
         ],
         telemetry: this.opts.telemetryEndpoint
           ? { endpoint: this.opts.telemetryEndpoint, attributes: { 'ih.session': run.session.id, 'ih.card': run.cardId } }
@@ -887,15 +941,19 @@ export class Runner {
     if (run.agent.resumed) {
       // The agent still has its conversation (task, notes, everything it had read): tell it what happened, not the task again.
       this.emit(run, 'daemon', { type: 'message', role: 'agent', text: 'Picked up the earlier session after the daemon restarted.' });
-      await this.work(run, resumedPrompt(run.board.mode === 'direct') + queued);
+      await this.work(run, resumedPrompt(run.board.mode === 'direct', this.lastInterruptReason(card) === 'cancelled' ? 'stopped' : 'restart') + queued);
       return;
     }
     const caps = this.opts.caps?.(run.board.id) ?? { maxChildren: 12, maxDepth: 5 };
     const prompt = run.firstPrompt
       ? run.firstPrompt
       : card.role === 'worker'
-        ? buildPrompt(usableCard, run.board, worktree, priorNotes(this.store, card), this.environment(run.board.id))
-        : buildOrchestratorPrompt(card, run.board, worktree, { ...caps, parallel: this.parallelism(run.board.id) }, this.team(card), this.opts.peerLines?.() ?? []);
+        ? buildPrompt(usableCard, run.board, worktree, priorNotes(this.store, card), {
+            ...this.environment(run.board.id),
+            mcp: this.opts.mcp?.describe(this.store.getSettings(run.board.id), { id: this.store.getCard(run.cardId)?.agentId ?? '', role: card.role }) ?? [],
+            guide: this.opts.addons?.guideLines(run.board.id) ?? [],
+          })
+        : buildOrchestratorPrompt(card, run.board, worktree, { ...caps, parallel: this.parallelism(run.board.id) }, this.team(card), this.opts.peerLines?.() ?? [], this.opts.mcp?.describe(this.store.getSettings(run.board.id)) ?? []);
     const earlier = this.store.listSessions(card.id).filter((s) => s.id !== run.session.id && s.state === 'failed');
     const resume = earlier.length
       ? run.board.mode === 'direct'
@@ -1028,8 +1086,24 @@ export class Runner {
     this.store.releaseLeases(run.cardId);
     const ok = stopReason === 'end_turn' || (stopReason === 'cancelled' && !run.cancelled);
     if (run.cancelled) {
-      this.close(run.cardId, 'ended');
-      this.store.updateCard(run.cardId, { status: 'ready' });
+      const by = run.cancelBy ?? 'daemon';
+      this.store.append('card.cancelled', run.cardId, { by, reason: run.cancelReason ?? '', requeue: run.requeue, state: 'busy', sessionId: run.session.id }, by);
+      if (run.requeue) {
+        this.close(run.cardId, 'ended');
+        this.store.updateCard(run.cardId, { status: 'ready' });
+      } else {
+        // A person stopped it: it stays stopped (the scheduler would otherwise start it again at once). Its conversation is noted so Run resumes it.
+        this.store.append('session.interrupted', run.cardId, { sessionId: run.session.id, poolId: run.pool.id, vendorSessionId: run.agent?.vendorSessionId ?? null, reason: 'cancelled' }, by);
+        this.close(run.cardId, 'ended');
+        this.store.updateCard(run.cardId, { status: 'blocked' });
+        this.store.postMessage({
+          boardId: run.board.id,
+          fromActor: 'daemon:cancel',
+          toCard: null,
+          body: `"${card.title}" (${card.id}) was stopped by you and stays stopped. Press Run on the card when you want it to carry on; it picks its conversation up where it stopped.`,
+          urgent: false,
+        });
+      }
     } else if (!ok || run.blockedReason) {
       if (run.blockedReason) this.emit(run, 'daemon', { type: 'error', message: `Blocked: ${run.blockedReason}` });
       this.close(run.cardId, 'failed');

@@ -1,4 +1,4 @@
-import { ruleMatches, type AgentProfile, type CardRole, type Classification, type Pool, type RoutingRules, type Settings, type Skill } from '@ih/core';
+import { mcpLevel, noteKey, ruleMatches, type AgentProfile, type CardRole, type Classification, type Pool, type RoutingRules, type Settings, type Skill } from '@ih/core';
 import { priorFor, priorSuccess } from './priors.ts';
 
 export * from './priors.ts';
@@ -93,6 +93,10 @@ export function rankPools(req: RouteRequest): Candidate[] {
     if (budget?.state === 'halted') reasons.push(`budget used up (${budget.pct}%)`);
     // Codex's shell has no network (Phase 6.2): cards that install or download go elsewhere.
     if (routing?.needsNetwork && pool.harness === 'codex') reasons.push("its shell has no network, and the card needs installs or downloads");
+    // The card needs MCP servers (Phase 9): only agents the board lets use them can take it.
+    for (const id of routing?.needsMcp ?? []) {
+      if (mcpLevel(settings, id, agent.id, agent.role) === 'off') reasons.push(`not allowed to use the ${id} MCP server (MCP tab)`);
+    }
     // Subscription pools whose 5-hour usage we can read keep a share of it for the orchestrator.
     const reserve = pool.id === 'claude' ? settings.claudeReservePct : pool.id === 'codex' ? (settings.codexReservePct ?? 30) : 0;
     if (reserve > 0 && (fiveHourPct ?? 0) >= 100 - reserve) {
@@ -110,7 +114,19 @@ export function rankPools(req: RouteRequest): Candidate[] {
     const failed = req.failedAgents?.includes(agent.id) ? 0.2 : 1;
     // A boost only counts for cards the agent handles well, so favouring a cheap agent does not send it the hard ones.
     const boosted = weight > 1 && c.complexity > prior.capability ? 1 : weight;
-    const score = success * headroom * scarcity * load * preferred * failed * boosted;
+    // Notes on the agent (`UI DEV`) pull cards toward it: what the planner asked for counts fully, Kev's guess only above 50%.
+    const wanted = (routing?.prefers ?? []).map(noteKey);
+    let noteFit = 0;
+    let noteName = '';
+    for (const n of (agent.notes ?? []).map(noteKey)) {
+      const fit = wanted.includes(n) ? 1 : Math.max(0, ((c.noteProbs?.[n] ?? 0) - 0.5) * 2);
+      if (fit > noteFit) {
+        noteFit = fit;
+        noteName = n;
+      }
+    }
+    const noteBoost = noteFit > 0 ? Math.min(2, 1 + Math.max(0, settings.noteWeight ?? 0.5) * noteFit) : 1;
+    const score = success * headroom * scarcity * load * preferred * failed * boosted * noteBoost;
     reasons.push(
       seen && seen.n > 0
         ? `success ${round(success)} (prior ${round(expected)} ${prior.family}, observed ${round(seen.rate)} n=${seen.n})`
@@ -119,6 +135,7 @@ export function rankPools(req: RouteRequest): Candidate[] {
       `scarcity ${scarcity}`,
       `load ${round(load)}`,
       ...(weight !== 1 ? [boosted === weight ? `weight ×${weight}` : `weight ×${weight} (not applied: complexity ${c.complexity.toFixed(1)} is above what it handles well)`] : []),
+      ...(noteBoost > 1 ? [`note "${noteName}" ×${round(noteBoost)}`] : []),
       ...(preferred > 1 ? ['previous agent'] : []),
       ...(failed < 1 ? ['failed this card before'] : []),
     );

@@ -238,6 +238,7 @@ test('boards that saved the old "agents\' requests wait for approval" default fo
   // Back to just before that migration; later migrations (a message column) run again, so undo what they added.
   first.db.exec('ALTER TABLE messages DROP COLUMN dismissed_at');
   first.db.exec('DROP TABLE pool_ejections');
+  first.db.exec('DROP TABLE mcp_library');
   first.db.exec('PRAGMA user_version = 12');
   first.close();
   const again = new Store(file);

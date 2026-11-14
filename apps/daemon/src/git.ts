@@ -98,7 +98,7 @@ export async function removeWorktreeSafely(repo: string, dir: string, force: boo
  * Build output and caches that agents (and test runs) leave behind; never committed, even in a repo whose
  * .gitignore doesn't cover them. Files already tracked under these paths are still updated.
  */
-export const BUILD_OUTPUT = ['**/__pycache__/**', '**/*.pyc', '**/.pytest_cache/**', '**/node_modules/**', '**/.DS_Store', '**/.mypy_cache/**', '**/.ruff_cache/**', '**/.playwright-mcp/**', '**/.agent-browser/**'];
+export const BUILD_OUTPUT = ['**/__pycache__/**', '**/*.pyc', '**/.pytest_cache/**', '**/node_modules/**', '**/.DS_Store', '**/.mypy_cache/**', '**/.ruff_cache/**', '**/.playwright-mcp/**', '**/.agent-browser/**', '**/.rbxsync-trash/**'];
 
 /** Commits everything in the worktree except build output. Returns the new commit sha, or null when there was nothing to commit. */
 export async function commitAll(dir: string, message: string): Promise<string | null> {

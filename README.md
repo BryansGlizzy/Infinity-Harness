@@ -62,7 +62,7 @@ Open <http://127.0.0.1:7420>. For development: `pnpm daemon` (restarts on change
 4. **Type a goal** in the top bar and press **Plan**. The orchestrator reads the repo and creates cards. They start by themselves.
 5. **Watch.** The **Tree** (or **Board**) shows each card with its role, agent, model and a one-line status. Click a card to see its activity, the files it changed, and the notes it left; attach to a Claude card's terminal; message its agent (start with `!urgent` to interrupt).
 6. **Step in when asked.** Things that need you collect in one place: a finished card you chose to review, a question from an agent, a request for a new tool, a blocked card. Everything else lands on its own. You can clear messages once read, and clicking one takes you to what it is about.
-7. **Read the wrap-up.** When every card of a goal is done, the orchestrator writes a final summary: what was done, how to run and verify it, decisions, open issues, and the documentation that applies. It arrives in your messages and is saved on the goal.
+7. **Read the wrap-up.** When the last card of a goal is done, the orchestrator that planned it gets one more turn and writes a report from what its cards told it: what was done, how to run and verify it, decisions, open issues, and the documentation they mention. It does not go back through the project, so it costs little. It arrives in your messages and is saved on the goal.
 
 ## How it works, in one page
 
@@ -74,6 +74,7 @@ Open <http://127.0.0.1:7420>. For development: `pnpm daemon` (restarts on change
 - **Agents talk through the board.** A shared MCP server lets them message each other, ask a question, search each other's notes and decisions, and write a handoff when a card moves to another agent.
 - **Landing.** A finished card is optionally reviewed by an agent from a *different* provider, then queued: the base branch is merged in, your tests run, and it lands as a PR (merged automatically) or a local merge commit. Conflicts and failing tests go back to the author, then to another agent, then to you. `git log --first-parent main` reads as one commit per card.
 - **You can review instead.** Turn on *Hold cards in Review for me* and approve, request changes (with comments on lines), land now, or try a branch in your checkout, from the web UI or VS Code.
+- **MCP servers, hosted once.** Install or link MCP servers for the machine (Settings → MCP); each board's **MCP** tab switches them on and sets which agents may use each one (off, read only or full). The harness runs a shared server once and agents reach it through it, so no agent ever holds the server's address or keys. The orchestrator is told what is available, so it never plans work nobody can do. Roblox Studio ships as an **add-on** you switch on per direct board (off by default): its MCP server, RbxSync's file sync running in the board's folder, and RbxSync's MCP server, all together. Agents can also carry short notes (UI DEV, CODE REVIEW…) that steer which cards they get.
 - **Things agents may not do alone** (spawn another agent, add an MCP server or skill, get a browser tool, install software) wait in an **approval queue** for your yes or no.
 - **Restarts are safe.** After a stop or crash, interrupted cards go back to Ready with their work kept, and agents pick their conversation up where the tool allows.
 
@@ -139,7 +140,7 @@ Nothing to do by hand. On the first start the daemon moves `.meta-harness/` to `
 ## Checks
 
 ```sh
-pnpm test        # ~290 tests against a real daemon with fake agents
+pnpm test        # ~300 tests against a real daemon with fake agents
 pnpm typecheck
 ```
 

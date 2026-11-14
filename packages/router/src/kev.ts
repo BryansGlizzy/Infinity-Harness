@@ -74,6 +74,8 @@ export interface CardForKev {
   /** The orchestrator's tag, confirmed with a yes/no question instead of a multi-way choice. */
   workType?: WorkType | null;
   parentTitle?: string | null;
+  /** Agent notes on the board (lower-cased): Kev says how much the card needs each (Phase 9). */
+  notes?: string[];
 }
 
 /** Defaults when Kev is unreachable: the card still routes, on a middling estimate. */
@@ -180,6 +182,10 @@ export class KevClient {
     } else {
       questions.work_type = { type: 'choice', instructions: 'What kind of work is this card?', criteria: UNTAGGED_CHOICES };
     }
+    const notes = (card.notes ?? []).slice(0, 6);
+    notes.forEach((n, i) => {
+      questions[`note_${i}`] = { type: 'noul', instructions: `Does this card need someone who is strong at: ${n}?` };
+    });
     const a = await this.decide(state, questions);
 
     let workType: WorkType;
@@ -200,6 +206,7 @@ export class KevClient {
       complexityProbs: Object.fromEntries(Object.entries(a.complexity?.probabilities ?? {}).map(([k, v]) => [k, Number(v)])),
       needsReview: Number(a.needs_review?.noul ?? 0.5),
       frontend: Number(a.frontend?.noul ?? 0),
+      ...(notes.length ? { noteProbs: Object.fromEntries(notes.map((n, i) => [n, Number(a[`note_${i}`]?.noul ?? 0)])) } : {}),
       source: 'kev',
       at: new Date().toISOString(),
     };

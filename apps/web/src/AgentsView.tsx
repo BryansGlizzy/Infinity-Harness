@@ -33,6 +33,48 @@ function ReasoningSelect(props: { pool?: PoolWithStatus; models: ModelCatalog; v
 }
 
 /** The delegation tree the agents form, starting at the orchestrators (master plan Phase 3.5). */
+/** Short notes on what an agent is for. Planners and the router weigh them (Phase 9): `UI DEV`, `CODE REVIEW`. */
+const NOTE_SUGGESTIONS = ['UI DEV', 'BACKEND', 'CODE REVIEW', 'SECURITY AUDITOR', 'TESTING', 'DOCS', 'ROBLOX', 'RESEARCH'];
+function NotesField({ agent, onChange }: { agent: AgentProfile; onChange: (notes: string[]) => void }) {
+  const [text, setText] = useState('');
+  const notes = agent.notes ?? [];
+  const add = (raw: string) => {
+    const note = raw.trim().replace(/,$/, '').trim().slice(0, 40);
+    setText('');
+    if (!note || notes.some((n) => n.toLowerCase() === note.toLowerCase()) || notes.length >= 6) return;
+    onChange([...notes, note]);
+  };
+  return (
+    <div className="agent-notes" title="Short notes on what this agent is for. The orchestrator sees them when it plans, and cards that fit a note are drawn to the agent that carries it (a nudge, not a rule). Up to 6.">
+      <span className="muted small">Notes</span>
+      <div className="row">
+        {notes.map((n) => (
+          <span key={n} className="note-chip">
+            {n}
+            <button className="ghost icon-btn" aria-label={`Remove note ${n}`} onClick={() => onChange(notes.filter((x) => x !== n))}>✕</button>
+          </span>
+        ))}
+        {notes.length < 6 && (
+          <>
+            <input
+              className="note-input"
+              list={`notes-${agent.id}`}
+              value={text}
+              placeholder={notes.length ? 'add…' : 'e.g. UI DEV'}
+              aria-label={`Add a note to ${agent.id}`}
+              maxLength={40}
+              onChange={(e) => (e.target.value.endsWith(',') ? add(e.target.value) : setText(e.target.value))}
+              onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), add(text))}
+              onBlur={() => text.trim() && add(text)}
+            />
+            <datalist id={`notes-${agent.id}`}>{NOTE_SUGGESTIONS.filter((n) => !notes.some((x) => x.toLowerCase() === n.toLowerCase())).map((n) => <option key={n} value={n} />)}</datalist>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Hierarchy({ agents, pools }: { agents: AgentProfile[]; pools: PoolWithStatus[] }) {
   const label = (a: AgentProfile) => shortModel(a.model || pools.find((p) => p.id === a.poolId)?.model || '');
   const node = (a: AgentProfile, seen: string[]): ReactNode => {
@@ -665,6 +707,7 @@ export function AgentsView(props: {
                         <ReasoningSelect pool={pool} models={models} value={a.reasoning ?? ''} onChange={(reasoning) => update(i, { reasoning })} />
                       </label>
                     </div>
+                    {a.role !== 'orchestrator' && <NotesField agent={a} onChange={(notes) => update(i, { notes })} />}
                     <div className="agent-status-bar">
                       <div className="row">
                         <PoolState pool={pool} sessions={props.sessions} />

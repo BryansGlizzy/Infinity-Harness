@@ -7,7 +7,7 @@ Every tool is on the `board` MCP server. Which ones you see depends on your role
 - `list_cards`: every card with status, role, parent, what it waits for, agent and branch.
 
 ## Planning (orchestrators and leads; workers only if the board allows)
-- `create_subtask(title, description, acceptance_criteria, work_type?, blocked_by?, parent_id?, delegate?, needs_network?, grants?)`: a card under yours. It starts by itself once the cards in `blocked_by` have reached Review. `delegate=true` makes a lead card that another agent plans further. `needs_network=true` keeps it away from agents whose shell has no network (Codex). `grants` asks for tool grants such as `browser` (see `extending`). The reply includes `plan`, how many waves your cards run in; if it comes with `plan_hint`, your cards are queued one behind another when they could run together: remove the `blocked_by` links that are only about order.
+- `create_subtask(title, description, acceptance_criteria, work_type?, blocked_by?, parent_id?, delegate?, needs_network?, grants?, needs_mcp?, prefers?)`: a card under yours. It starts by itself once the cards in `blocked_by` have reached Review. `delegate=true` makes a lead card that another agent plans further. `needs_network=true` keeps it away from agents whose shell has no network (Codex). `grants` asks for tool grants such as `browser` (see `extending`). `needs_mcp` names MCP servers from your prompt that the card needs, and only agents allowed to use them take it; `prefers` names an agent note (e.g. `UI DEV`) the card fits (see `mcp`). The reply includes `plan`, how many waves your cards run in; if it comes with `plan_hint`, your cards are queued one behind another when they could run together: remove the `blocked_by` links that are only about order.
 - `update_subtask`: revise a card you created, for example after its spec was sent back as too vague.
 - `add_dependency(card_id, blocked_by)`: cycles are refused.
 
@@ -35,6 +35,7 @@ Every tool is on the `board` MCP server. Which ones you see depends on your role
 - `report_milestone(milestone)`: only for a goal that came from another swarm and listed milestones (orchestrators and leads): tell the requester a stage was reached.
 
 ## Getting out
+- `ask_parent(question, tried?)`: you are stuck, or something outside your worktree is broken. Ask the agent that planned your card, once; it can answer, change your card or tell the human (the human is told if it is not available). `addon_status()` (when the board has an add-on on) says whether the add-on's outside half, such as Studio's plugins, is connected. See `mcp`.
 - `report_blocked(reason)`: you cannot finish. Write a handoff first. The card goes to another agent.
 - `escalate_to_human(reason)`: you need a decision or access no agent can give. The card waits for a human, who answers in an approval; you resume with their note.
 

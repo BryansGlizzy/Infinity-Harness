@@ -1,5 +1,5 @@
 import { EventStream, isLive, loadNeeds, type StreamMessage } from '@ih/client';
-import { CARD_STATUSES, type Board, type Card, type CardStatus } from '@ih/core';
+import { CARD_STATUSES, MCP_LEVELS, type Board, type Card, type CardStatus, type McpLevel } from '@ih/core';
 import { attachTerminal, DETACH_HINT } from '@ih/client/node';
 import { runTui } from '@ih/tui';
 import { connect, resolveBoard, resolveCard, splitRef, type Flags, type Target } from './context.ts';
@@ -377,6 +377,100 @@ export const COMMANDS: Command[] = [
         }
         const open = (await t.api.messages(board.id)).filter((m) => m.toCard === null && !m.fromActor.startsWith('user:') && !m.dismissedAt);
         ctx.print(open, () => (open.length ? table(open.map((m) => [m.id, m.fromActor.replace(/^card:/, 'card '), m.body.split('\n')[0]!, ago(m.createdAt)]), ['ID', 'FROM', 'MESSAGE', 'WHEN'], 90) : 'No messages for you.\n'));
+      });
+    },
+  },
+  {
+    name: 'report',
+    usage: 'ih report [CARD] [--board B]',
+    summary: 'Where a board\'s effort went, per card: steps, restarts, failed MCP calls, probing, diagnosing, refused calls, tokens, and what looks wasteful',
+    async run(ctx) {
+      await withTarget(ctx, async (t) => {
+        const board = await resolveBoard(t.api, ctx.flags.board, ctx.io);
+        const full = await t.api.efficiency(board.id);
+        const only = ctx.args[0];
+        const cards = only ? full.cards.filter((c) => c.id === only || c.id.startsWith(only) || c.title.toLowerCase().includes(only.toLowerCase())) : full.cards;
+        const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+        ctx.print({ cards, totals: full.totals }, () =>
+          [
+            table(
+              cards.map((c) => [c.id.slice(2, 8), (c.agent ?? '-').slice(0, 10), `${c.minutes}m`, String(c.steps), String(c.sessions), `${c.mcp.failed}/${c.mcp.calls}`, String(c.mcp.probes), String(c.diagnosticShell), String(c.refused), `${k(c.tokens.input)}/${k(c.tokens.output)} (${k(c.tokens.cache)})`, c.title.slice(0, 40)]),
+              ['CARD', 'AGENT', 'TIME', 'STEPS', 'RUNS', 'MCP FAIL/ALL', 'PROBE', 'DIAG', 'REFUSED', 'TOKENS IN/OUT (CACHE)', 'TITLE'],
+              150,
+            ),
+            ...cards.filter((c) => c.flags.length).map((c) => `${c.id.slice(2, 8)}: ${c.flags.join('; ')}`),
+            `totals: ${full.totals.steps} steps, ${full.totals.restarts} restart${full.totals.restarts === 1 ? '' : 's'}, ${full.totals.mcpFailed}/${full.totals.mcpCalls} MCP calls failed, ${full.totals.diagnosticShell} diagnosing, ${full.totals.refused} refused`,
+          ].join('\n') + '\n',
+        );
+      });
+    },
+  },
+  {
+    name: 'addon',
+    usage: 'ih addon [list] | ih addon on|off <add-on> [--move]',
+    summary: 'Add-ons for the board (Roblox Studio: its MCP servers and a file sync in the board\'s folder, switched on together; off by default). --move takes the sync over from another board',
+    options: { move: { type: 'boolean' } },
+    async run(ctx) {
+      const [sub = 'list', id] = ctx.args;
+      const usage = 'ih addon [list] | ih addon on|off <add-on> [--move]';
+      if (sub !== 'list' && sub !== 'on' && sub !== 'off') throw new UsageError(usage);
+      if (sub !== 'list' && !id) throw new UsageError(usage);
+      await withTarget(ctx, async (t) => {
+        const board = await resolveBoard(t.api, ctx.flags.board, ctx.io);
+        if (sub === 'on' || sub === 'off') {
+          const view = await (sub === 'on' ? t.api.addonEnable(board.id, id!, ctx.values.move === true) : t.api.addonDisable(board.id, id!));
+          return ctx.print(view, () => `${view.label} is ${view.enabled ? 'on' : 'off'} for ${board.name}\n${view.components.map((c) => `  ${c.label}: ${c.state}${c.detail ? ` (${c.detail})` : ''}`).join('\n')}\n`);
+        }
+        const list = await t.api.addons(board.id);
+        ctx.print(list, () =>
+          table(
+            list.map((a) => [a.id, a.enabled ? 'on' : 'off', a.available ? '' : a.reasons[0] ?? 'not available', a.components.map((c) => `${c.label} ${c.state}`).join(', ')]),
+            ['ADD-ON', 'THIS BOARD', 'NOTE', 'PARTS'],
+            110,
+          ),
+        );
+      });
+    },
+  },
+  {
+    name: 'mcp',
+    usage: 'ih mcp [list] | ih mcp start|stop|restart|refresh <server> | ih mcp on|off <server> | ih mcp access <server> <agent|default> off|read|full',
+    summary: "MCP servers the harness hosts: what is in the library and running, which are on for the board, and how far each agent may use them",
+    async run(ctx) {
+      const [sub = 'list', id, agent, level] = ctx.args;
+      const usage = 'ih mcp [list] | ih mcp start|stop|restart|refresh <server> | ih mcp on|off <server> | ih mcp access <server> <agent|default> off|read|full';
+      await withTarget(ctx, async (t) => {
+        if (sub === 'start' || sub === 'stop' || sub === 'restart' || sub === 'refresh') {
+          if (!id) throw new UsageError(usage);
+          const v = await t.api.mcpAction(id, sub);
+          return ctx.print(v, () => `${v.entry.id}: ${v.state}${v.error ? ` (${v.error})` : ''}, ${v.tools.length} tools\n`);
+        }
+        const board = await resolveBoard(t.api, ctx.flags.board, ctx.io);
+        const settings = await t.api.settings(board.id);
+        const mcp = settings.mcp;
+        if (sub === 'on' || sub === 'off') {
+          if (!id) throw new UsageError(usage);
+          if (!(await t.api.mcpServers()).some((s) => s.entry.id === id)) throw new UsageError(`no server "${id}" in the library (see: ih mcp)`);
+          const enabled = sub === 'on' ? [...new Set([...mcp.enabled, id])] : mcp.enabled.filter((e) => e !== id);
+          const next = (await t.api.updateSettings(board.id, { mcp: { ...mcp, enabled } })).mcp;
+          if (sub === 'on') await t.api.mcpAction(id, 'start').catch(() => {});
+          return ctx.print(next, () => `${id} is ${sub} for ${board.name}\n`);
+        }
+        if (sub === 'access') {
+          if (!id || !agent || !MCP_LEVELS.includes(level as McpLevel)) throw new UsageError(usage);
+          const cur = mcp.access[id] ?? { default: 'full' as McpLevel, agents: {} };
+          const nextAccess = agent === 'default' ? { ...cur, default: level as McpLevel } : { ...cur, agents: { ...cur.agents, [agent]: level as McpLevel } };
+          const next = (await t.api.updateSettings(board.id, { mcp: { ...mcp, access: { ...mcp.access, [id]: nextAccess } } })).mcp;
+          return ctx.print(next, () => `${id}: ${agent} is now ${level}\n`);
+        }
+        if (sub !== 'list') throw new UsageError(usage);
+        const servers = await t.api.mcpServers();
+        ctx.print({ servers, enabled: mcp.enabled, access: mcp.access }, () =>
+          table(
+            servers.map((s) => [s.entry.id, mcp.enabled.includes(s.entry.id) ? 'on' : 'off', s.installed ? s.state : 'not installed', String(s.tools.length), s.entry.hosting, s.entry.label]),
+            ['SERVER', 'THIS BOARD', 'STATE', 'TOOLS', 'HOSTING', 'NAME'],
+          ),
+        );
       });
     },
   },

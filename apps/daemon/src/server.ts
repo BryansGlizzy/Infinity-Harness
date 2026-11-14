@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
-import { ARTIFACT_KINDS, CARD_STATUSES, effectiveAgents, validateAgents, type ArtifactKind, type CardStatus, type ModelOption, type ReasoningOptions, type BoardMode, type RoutingRules, type Settings } from '@ih/core';
+import { ARTIFACT_KINDS, CARD_STATUSES, effectiveAgents, validateAgents, validateMcpSettings, type ArtifactKind, type CardStatus, type ModelOption, type ReasoningOptions, type BoardMode, type RoutingRules, type Settings } from '@ih/core';
 import type { ContextService, SearchScope } from '@ih/context';
 import type { FastLane } from '@ih/fast-lane';
 import { priorFor } from '@ih/router';
@@ -15,6 +15,8 @@ import { checkRequest, type AuthOptions } from './auth.ts';
 import type { DaemonConfig } from './config.ts';
 import type { Live } from './live.ts';
 import { registerBoardMcp } from './board-mcp.ts';
+import { registerMcpHub, type McpHub } from './mcp-hub.ts';
+import { AddonError, type Addons } from './addons.ts';
 import { changesBetween, commitsBetween, diffBetween, fileAt, git, inspectRepo, removeWorktreeSafely, revParse, tryLocally } from './git.ts';
 import type { PoolHealth } from './health.ts';
 import type { Runner } from './runner.ts';
@@ -27,6 +29,7 @@ import { buildChat } from './chat.ts';
 import { outages } from './history.ts';
 import type { IdeBridge } from './ide.ts';
 import { buildMetrics } from './metrics.ts';
+import { buildEfficiency } from './report.ts';
 import type { Refinery } from './refinery.ts';
 import { registerTelemetry } from './telemetry.ts';
 import { RemovalError, inspectRemoval, removeBoard } from './boards.ts';
@@ -91,6 +94,10 @@ export interface ServerDeps {
   health?: PoolHealth | null;
   /** System harness discovery, installation, and authentication. */
   harnesses?: HarnessManager | null;
+  /** MCP servers hosted for every agent (Phase 9). */
+  mcp?: McpHub | null;
+  /** Add-ons a board switches on in one go (Roblox Studio: MCP servers plus a file sync in the board's folder). */
+  addons?: Addons | null;
 }
 
 const HARNESS_IDS: readonly SystemHarnessId[] = ['claude', 'codex', 'kimi', 'agy', 'opencode', 'gh'];
@@ -99,7 +106,7 @@ function asHarnessId(raw: string): SystemHarnessId {
   throw new HttpError(404, `unknown harness: ${raw}`);
 }
 
-export async function buildServer({ store, runner, config, live, limiter, scheduler, context, fastLane, council, refinery, budgets, approvals, bridge, federation, auth, health, harnesses }: ServerDeps): Promise<FastifyInstance> {
+export async function buildServer({ store, runner, config, live, limiter, scheduler, context, fastLane, council, refinery, budgets, approvals, bridge, federation, auth, health, harnesses, mcp, addons }: ServerDeps): Promise<FastifyInstance> {
   const harnessMgr =
     harnesses ??
     new HarnessManager({
@@ -162,7 +169,8 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
     });
   });
 
-  registerBoardMcp(app, store, runner, { context, fastLane, approvals, bridge, federation, docsDir: join(config.root, 'docs', 'agents') });
+  registerBoardMcp(app, store, runner, { context, fastLane, approvals, bridge, federation, docsDir: join(config.root, 'docs', 'agents'), mcp, addons });
+  if (mcp) registerMcpHub(app, runner, mcp);
   if (federation) registerFederationApi(app, federation);
   // OTLP/HTTP receiver for Claude Code's token and cost metrics (Phase 6.3).
   registerTelemetry(app, store);
@@ -338,7 +346,9 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
   });
   app.post<{ Params: { id: string }; Body: { mode?: string; confirmName?: string } }>('/api/boards/:id/remove', async (req) => {
     try {
-      return await removeBoard({ store, runner, config, federation }, req.params.id, { mode: (req.body?.mode ?? '') as 'forget' | 'delete', confirmName: req.body?.confirmName });
+      const removed = await removeBoard({ store, runner, config, federation }, req.params.id, { mode: (req.body?.mode ?? '') as 'forget' | 'delete', confirmName: req.body?.confirmName });
+      await addons?.forgetBoard(req.params.id);
+      return removed;
     } catch (err) {
       if (err instanceof RemovalError) throw new HttpError(err.statusCode, err.message);
       throw err;
@@ -443,6 +453,14 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
         throw new HttpError(400, 'agentWeights must map agent ids to numbers between 0 and 10');
       }
     }
+    if (patch.addons !== undefined) throw new HttpError(400, 'add-ons are switched on and off with /api/boards/:id/addons/:addon/enable|disable, which also start and stop their parts');
+    if (patch.mcp) {
+      const problem = validateMcpSettings(patch.mcp);
+      if (problem) throw new HttpError(400, problem);
+    }
+    if (patch.noteWeight !== undefined && (typeof patch.noteWeight !== 'number' || !Number.isFinite(patch.noteWeight) || patch.noteWeight < 0 || patch.noteWeight > 2)) {
+      throw new HttpError(400, 'noteWeight must be a number between 0 and 2');
+    }
     if (patch.agents) {
       // Checked with the implicit workers included, since delegation may name them.
       const next = mergeSettings(store.getSettings(req.params.id), patch);
@@ -463,7 +481,8 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
     }
   });
   app.post<{ Params: { id: string } }>('/api/cards/:id/cancel', async (req) => {
-    await runner.cancel(req.params.id);
+    // A person's stop keeps the card stopped; it used to go straight back to Ready and start again.
+    await runner.cancel(req.params.id, { by: 'user:local', reason: 'stopped from a client', requeue: false });
     return { ok: true };
   });
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>('/api/cards/:id/events', async (req) => {
@@ -630,6 +649,103 @@ export async function buildServer({ store, runner, config, live, limiter, schedu
     const since = new Date(Date.now() - hours * 3_600_000).toISOString();
     const samples = store.poolHistory(req.params.id, since);
     return { poolId: req.params.id, hours, samples, usage: store.poolUsageSeries(req.params.id, since, hours > 72 ? 'day' : 'hour'), outages: outages(samples) };
+  });
+
+  // --- MCP library and hub (Phase 9). The library is per machine; each board switches servers on in its settings.
+  const needMcp = () => {
+    if (!mcp) throw new HttpError(503, 'the MCP hub is not running');
+    return mcp;
+  };
+  app.get('/api/mcp', async () => needMcp().list());
+  app.post<{ Body: unknown }>('/api/mcp', async (req) => {
+    const hub = needMcp();
+    const entry = req.body as { id?: string };
+    if (entry?.id && hub.entry(entry.id) && !hub.entry(entry.id)!.builtin) throw new HttpError(409, `"${entry.id}" is already in the library; edit it instead`);
+    try {
+      hub.save(req.body as never);
+      return hub.view((req.body as { id: string }).id);
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+  });
+  app.put<{ Params: { id: string }; Body: unknown }>('/api/mcp/:id', async (req) => {
+    const hub = needMcp();
+    if (!hub.entry(req.params.id)) throw new HttpError(404, 'no such server');
+    try {
+      hub.save({ ...(req.body as object), id: req.params.id } as never);
+      return hub.view(req.params.id);
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+  });
+  app.delete<{ Params: { id: string } }>('/api/mcp/:id', async (req) => {
+    try {
+      if (!(await needMcp().remove(req.params.id))) throw new HttpError(404, 'no such server');
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      throw new HttpError(409, (err as Error).message);
+    }
+  });
+  for (const action of ['start', 'stop', 'restart', 'refresh'] as const) {
+    app.post<{ Params: { id: string } }>(`/api/mcp/:id/${action}`, async (req) => {
+      const hub = needMcp();
+      if (!hub.entry(req.params.id)) throw new HttpError(404, 'no such server');
+      try {
+        if (action === 'start') await hub.ensure(req.params.id);
+        else if (action === 'stop') await hub.stop(req.params.id);
+        else if (action === 'restart') await hub.restart(req.params.id);
+        else await hub.refresh(req.params.id);
+      } catch (err) {
+        throw new HttpError(409, (err as Error).message);
+      }
+      return hub.view(req.params.id);
+    });
+  }
+  // The operator pressing Install is the approval: only the library entry's own install text runs.
+  app.post<{ Params: { id: string } }>('/api/mcp/:id/install', async (req) => {
+    const hub = needMcp();
+    if (!hub.entry(req.params.id)) throw new HttpError(404, 'no such server');
+    const result = await hub.install(req.params.id);
+    return { ...result, server: hub.view(req.params.id) };
+  });
+  // Add-ons: a bundle of MCP servers plus a helper process in the board's folder, switched on together (off by default).
+  const needAddons = () => {
+    if (!addons) throw new HttpError(503, 'add-ons are not available');
+    return addons;
+  };
+  const addonCall = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof AddonError) throw new HttpError(err.statusCode, err.message);
+      throw err;
+    }
+  };
+  app.get<{ Params: { id: string } }>('/api/boards/:id/addons', async (req) => {
+    if (!store.getBoard(req.params.id)) throw new HttpError(404, 'board not found');
+    return needAddons().view(req.params.id);
+  });
+  app.post<{ Params: { id: string; addon: string }; Body: { move?: boolean } }>('/api/boards/:id/addons/:addon/enable', async (req) =>
+    addonCall(() => needAddons().enable(req.params.id, req.params.addon, { move: req.body?.move === true })),
+  );
+  app.post<{ Params: { id: string; addon: string } }>('/api/boards/:id/addons/:addon/disable', async (req) => addonCall(() => needAddons().disable(req.params.id, req.params.addon)));
+  // One list for a board's MCP tab: library servers and the tool grants (browser, desktop) together, with the board's choices.
+  app.get<{ Params: { id: string } }>('/api/boards/:id/mcp', async (req) => {
+    if (!store.getBoard(req.params.id)) throw new HttpError(404, 'board not found');
+    const settings = store.getSettings(req.params.id);
+    const missing = new Set(approvals?.missingTools(req.params.id, Object.keys(settings.grants)) ?? []);
+    return {
+      servers: mcp?.list() ?? [],
+      grants: Object.entries(settings.grants).map(([name, g]) => ({ name, label: g.label, description: g.description, mode: g.mode, command: g.command, installed: !!g.command && !missing.has(name), installable: !!g.install?.trim() && !!approvals })),
+      mcp: settings.mcp,
+    };
+  });
+
+  // Where a board's effort went, per card: steps, failures, restarts, refused calls, tokens.
+  app.get<{ Params: { id: string } }>('/api/boards/:id/efficiency', async (req) => {
+    if (!store.getBoard(req.params.id)) throw new HttpError(404, 'board not found');
+    return buildEfficiency(store, req.params.id);
   });
 
   // --- approvals (Phase 6.4)

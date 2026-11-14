@@ -5,6 +5,7 @@ import { remember, saved } from './storage.ts';
 import { Field, NumField, Toggle } from './SettingsFields.tsx';
 import { BudgetsTab } from './SettingsBudgets.tsx';
 import { ToolsTab } from './SettingsTools.tsx';
+import { McpLibrary } from './SettingsMcp.tsx';
 
 export { ModelSelect } from './AgentsView.tsx';
 
@@ -16,18 +17,21 @@ const TABS = [
   { id: 'guardrails', label: 'Guardrails' },
   { id: 'budgets', label: 'Budgets' },
   { id: 'tools', label: 'Tools' },
+  { id: 'mcp', label: 'MCP' },
 ] as const;
 type Tab = (typeof TABS)[number]['id'];
 
 /** Settings each tab owns, for its "Reset to defaults". */
 const SECTION_KEYS: Record<Tab, (keyof Settings)[]> = {
-  routing: ['autoRoute', 'claudeReservePct', 'codexReservePct', 'rerouteAfterSec', 'stallMinutes', 'poolSlots', 'scarcity', 'agentWeights'],
+  routing: ['autoRoute', 'claudeReservePct', 'codexReservePct', 'rerouteAfterSec', 'stallMinutes', 'poolSlots', 'scarcity', 'agentWeights', 'noteWeight'],
   refinery: ['autoLand', 'landMode', 'testTimeoutSec', 'mergeAttempts', 'maxRetries', 'crossReview', 'reviewThreshold', 'maxReviewRounds'],
   learning: ['learnFromOutcomes', 'kevOutcomeScoring', 'priorOverrides'],
   fastlane: ['narrator', 'specLint', 'queryRewrite', 'artifactTagging', 'quickAnswers', 'notificationText'],
   guardrails: ['maxDepth', 'maxChildren', 'maxCardsPerTurn', 'councilVerifyRounds', 'shareToolchains', 'toolPaths', 'directParallel'],
   budgets: ['budgets'],
-  tools: ['humanReview', 'finalSummary', 'bestOfN', 'grants', 'autoApproveSpawn'],
+  tools: ['humanReview', 'finalSummary', 'addonGate', 'bestOfN', 'grants', 'autoApproveSpawn'],
+  // The library belongs to the machine, not the board: nothing here to reset.
+  mcp: [],
 };
 
 /** One folder per line; saved when the field loses focus. Only absolute and `~/` paths are kept. */
@@ -207,6 +211,7 @@ export function SettingsPanel(props: {
               <NumField label="Claude reserve for the orchestrator" unit="%" hint="Workers stop taking Claude cards when its 5-hour usage passes 100 − this." value={settings.claudeReservePct} def={D.claudeReservePct} min={0} max={90} onSave={(n) => save({ claudeReservePct: n })} />
               <NumField label="Codex reserve for the orchestrator" unit="%" hint="The same, for Codex's 5-hour window." value={settings.codexReservePct ?? 30} def={D.codexReservePct} min={0} max={90} onSave={(n) => save({ codexReservePct: n })} />
               <NumField label="Re-route after" unit=" s" hint="How long a ready card waits for a halted pool before it moves to the next best agent." value={settings.rerouteAfterSec} def={D.rerouteAfterSec} min={0} onSave={(n) => save({ rerouteAfterSec: n })} />
+              <NumField label="Pull of agent notes" hint="How strongly an agent's notes (UI DEV, CODE REVIEW…) draw matching cards to it: its score is multiplied by 1 + this × how well the card fits, at most 2×. 0 ignores notes." value={settings.noteWeight} def={D.noteWeight} min={0} max={2} step={0.1} onSave={(n) => save({ noteWeight: n })} />
               <NumField label="Stalled after" unit=" min" hint="A turn with no activity this long is ended and the card goes back to Ready." value={settings.stallMinutes} def={D.stallMinutes} min={0} onSave={(n) => save({ stallMinutes: n })} />
             </div>
             <p className="hint">Want cards to go to a particular agent more (or less) often? Each worker has a <strong>routing weight</strong> in <button className="link" onClick={props.onOpenAgents}>Agents</button>: above 1 favours it for cards it handles well, below 1 holds it back, 0 keeps cards off it.</p>
@@ -320,13 +325,16 @@ export function SettingsPanel(props: {
         )}
         {tab === 'budgets' && <BudgetsTab settings={settings} pools={props.pools} save={save} />}
         {tab === 'tools' && <ToolsTab boardId={props.boardId} settings={settings} save={save} onError={props.onError} />}
+        {tab === 'mcp' && <McpLibrary onError={props.onError} />}
       </div>
 
-      <div className="settings-foot">
-        <button className="ghost small-btn" onClick={resetSection} title={`Reset ${TABS.find((t) => t.id === tab)!.label} to the defaults`}>
-          Reset {TABS.find((t) => t.id === tab)!.label} to defaults
-        </button>
-      </div>
+      {tab !== 'mcp' && (
+        <div className="settings-foot">
+          <button className="ghost small-btn" onClick={resetSection} title={`Reset ${TABS.find((t) => t.id === tab)!.label} to the defaults`}>
+            Reset {TABS.find((t) => t.id === tab)!.label} to defaults
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

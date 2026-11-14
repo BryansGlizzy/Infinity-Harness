@@ -82,6 +82,8 @@ export interface Classification {
   needsReview: number;
   /** Probability that this is mainly web front-end work (UI, HTML/CSS, browser JavaScript); some models are better at it. */
   frontend?: number;
+  /** Probability, per agent note on the board (lower-cased), that the card needs someone with that note (Phase 9). */
+  noteProbs?: Record<string, number>;
   /** `kev` when Kev answered, `fallback` when it was unreachable and defaults were used. */
   source: 'kev' | 'fallback';
   at: string;
@@ -101,6 +103,10 @@ export interface RoutingRules {
    * shell has none (Codex, master plan Phase 6.2) are skipped.
    */
   needsNetwork?: boolean;
+  /** MCP servers (library ids) the card's agent must be allowed to use; agents without access are skipped (Phase 9). */
+  needsMcp?: string[];
+  /** Agent notes (e.g. `UI DEV`) the planner wants for this card; agents carrying one are preferred (Phase 9). */
+  prefers?: string[];
 }
 
 /** Where a card is in review, landing and retries (master plan §5.4 steps 6–8, §5.6). */
@@ -131,8 +137,11 @@ export interface Pipeline {
   waitingOn?: string[];
   /** Outbound requests that are confirmed done when this card is done: it was resumed to check what a peer landed. */
   confirms?: string[];
-  /** On a finished goal: the card where the orchestrator wrote its final summary, and how many finished cards it covered. */
-  finalSummary?: { cardId: string; cards: number; at: string };
+  /**
+   * On a finished goal: where its final summary was written (the goal card itself, since the orchestrator that planned it writes it; older
+   * goals have a separate Summary card), how many finished cards it covered, and whether the report is still being written.
+   */
+  finalSummary?: { cardId: string; cards: number; at: string; pending?: boolean };
   /** On a summary card: the goal it summarizes. */
   summaryOf?: string;
 }
@@ -290,6 +299,8 @@ export interface AgentProfile {
   /** Agents the child cards of an orchestrator or lead may go to; empty means any worker (and for the orchestrator, any lead). */
   delegatesTo: string[];
   enabled: boolean;
+  /** Short notes on what this agent is for (`UI DEV`, `CODE REVIEW`); planners and the router weigh them (Phase 9). */
+  notes?: string[];
   /** Not saved in settings: added for a pool that has no worker or lead of its own. */
   implicit?: boolean;
 }
@@ -333,6 +344,26 @@ export function delegationTargets(caller: AgentProfile | undefined, callerRole: 
   return usable.filter((a) => a.role === 'worker' || (callerRole === 'orchestrator' && a.role === 'lead'));
 }
 
+/** Agent notes: at most `MAX_AGENT_NOTES`, each 1 to `MAX_NOTE_LENGTH` characters (Phase 9). */
+export const MAX_AGENT_NOTES = 6;
+export const MAX_NOTE_LENGTH = 40;
+
+export function validateNotes(notes: string[] | undefined): string | null {
+  if (!notes) return null;
+  if (!Array.isArray(notes) || notes.some((n) => typeof n !== 'string')) return 'notes must be a list of short texts';
+  if (notes.length > MAX_AGENT_NOTES) return `at most ${MAX_AGENT_NOTES} notes`;
+  for (const n of notes) if (!n.trim() || n.trim().length > MAX_NOTE_LENGTH) return `each note is 1 to ${MAX_NOTE_LENGTH} characters ("${n.slice(0, 20)}")`;
+  return null;
+}
+
+/** Notes compare without case or surrounding space. */
+export const noteKey = (note: string): string => note.trim().toLowerCase();
+
+/** Every distinct note (lower-cased) carried by an enabled worker or lead: the ones Kev is asked about. */
+export function boardNotes(agents: Pick<AgentProfile, 'enabled' | 'role' | 'notes'>[]): string[] {
+  return [...new Set(agents.filter((a) => a.enabled && a.role !== 'orchestrator').flatMap((a) => (a.notes ?? []).map(noteKey)))].slice(0, MAX_AGENT_NOTES);
+}
+
 /** Problems with an agent list, checked when settings are saved: ids, targets, and no delegation cycles. */
 export function validateAgents(agents: AgentProfile[]): string | null {
   const byId = new Map<string, AgentProfile>();
@@ -340,6 +371,8 @@ export function validateAgents(agents: AgentProfile[]): string | null {
     if (!/^[a-z0-9][a-z0-9._-]{0,39}$/i.test(a.id)) return `agent id "${a.id}" must be 1–40 letters, digits, dots, dashes or underscores`;
     if (byId.has(a.id)) return `two agents are called "${a.id}"`;
     if (!CARD_ROLES.includes(a.role)) return `agent ${a.id}: unknown role ${a.role}`;
+    const noteProblem = validateNotes(a.notes);
+    if (noteProblem) return `agent ${a.id}: ${noteProblem}`;
     byId.set(a.id, a);
   }
   for (const a of agents) {
@@ -473,6 +506,209 @@ export interface BoardMcp {
   url?: string;
 }
 
+
+// --- MCP hub (Phase 9): servers installed or linked once per machine, switched on per board, limited per agent.
+
+/** How far an agent may use a server: not at all, only tools that read, or every tool. */
+export type McpLevel = 'off' | 'read' | 'full';
+export const MCP_LEVELS: readonly McpLevel[] = ['off', 'read', 'full'];
+
+/** A tool a server offers, as discovered with `tools/list`. */
+export interface McpToolInfo {
+  name: string;
+  description: string;
+  /** The server's own `readOnlyHint`, when it sets one. */
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  /** Agents are shown this tool (false: the library entry's `toolAllow` leaves it out). Set when a view is built. */
+  offered?: boolean;
+}
+
+/**
+ * A server in the machine's library. `shared` servers are run once by the daemon and reached through the hub (agents
+ * never see the server's own address or secrets); `per-session` ones are started by each agent session (stateless
+ * tools such as a browser, where a copy per card is the point).
+ */
+export interface McpLibraryEntry {
+  id: string;
+  label: string;
+  /** What it is for: planners read this to decide which cards can use it. */
+  description: string;
+  transport: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** Working directory of a stdio server. */
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  hosting: 'shared' | 'per-session';
+  /** It drives one real shared thing (an open Studio place): write calls are served one at a time. */
+  exclusive: boolean;
+  /** Pinned version, shown beside the server (servers and their plugins often must match). */
+  version?: string;
+  /** Shell command that installs it. Runs only when the operator presses Install; agents never supply it. */
+  install?: string;
+  /** Told to the agents that may use it. */
+  usage?: string;
+  /** Operator's call on tools the server does not mark read-only (or marks wrongly). */
+  toolKinds: Record<string, 'read' | 'write'>;
+  /**
+   * When set, agents are offered only these tools; the rest are neither listed nor callable. Every tool an agent is
+   * offered costs context on every step, so a server's long tail (profilers, monetization…) stays out of their way.
+   */
+  toolAllow?: string[];
+  /** Appended to a call's error when the server looks unreachable, so an agent stops probing and asks for help. */
+  unavailableHint?: string;
+  /** Start with the daemon (otherwise on first use). */
+  autoStart: boolean;
+  /** Shipped with the daemon: can be edited but not removed. */
+  builtin?: boolean;
+}
+
+export type McpRunState = 'stopped' | 'starting' | 'running' | 'error';
+
+/** A library server with what the daemon knows about it right now. */
+export interface McpServerView {
+  entry: McpLibraryEntry;
+  state: McpRunState;
+  error: string | null;
+  tools: McpToolInfo[];
+  startedAt: string | null;
+  /** Calls served since the daemon started. */
+  calls: number;
+  /** Its command exists on this machine; false means Install is needed. */
+  installed: boolean;
+  /** The last lines the server wrote to stderr. */
+  log: string[];
+}
+
+/** What a board's MCP tab shows: the library, the tool grants beside it, and the board's own choices. */
+export interface BoardMcpView {
+  servers: McpServerView[];
+  grants: { name: string; label: string; description: string; mode: ToolGrant['mode']; command: string; installed: boolean; installable: boolean }[];
+  mcp: McpBoardSettings;
+}
+
+/** One part of an add-on, as the MCP tab shows it. */
+export interface AddonComponent {
+  id: string;
+  label: string;
+  /** `plugin` is a part that lives outside the harness (Studio's plugins): running means connected. */
+  kind: 'mcp' | 'service' | 'plugin';
+  state: 'running' | 'starting' | 'stopped' | 'error' | 'missing';
+  /** What to do or what went wrong, in a sentence. */
+  detail?: string;
+}
+
+/**
+ * An add-on switches on a set of MCP servers and, where it needs one, a helper process that runs in the board's folder
+ * (Roblox Studio: the Studio MCP server, RbxSync's file sync and its MCP server). Off by default, per board.
+ */
+export interface AddonView {
+  id: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  /** Nothing stops it being switched on now: false lists why in `reasons`. */
+  available: boolean;
+  reasons: string[];
+  /** Worth knowing, not blocking. */
+  warnings: string[];
+  /** Another board holds the helper process (only one folder can be served at a time). */
+  heldBy: { boardId: string; boardName: string } | null;
+  /** Files switching it on will create in the board's folder. */
+  willCreate: string[];
+  components: AddonComponent[];
+  /** Studio's side as last read: connected, not connected, or unknown (null). */
+  ready: boolean | null;
+  /** What to do when it is not ready. */
+  advice: string | null;
+}
+
+/** What a card cost in steps, failures and restarts, read from its event log (for finding where a run burned effort). */
+export interface CardEfficiency {
+  id: string;
+  title: string;
+  agent: string | null;
+  status: string;
+  sessions: number;
+  /** Sessions beyond the first: the card started over. */
+  restarts: number;
+  cancels: { by: string; n: number }[];
+  /** Tool calls the agent made. */
+  steps: number;
+  mcp: { calls: number; failed: number; failedSeconds: number; probes: number };
+  /** Shell commands that look like diagnosing the machine (ps, ss, find, strings, tail…), and calls the path policy refused. */
+  diagnosticShell: number;
+  refused: number;
+  tokens: { input: number; output: number; cache: number };
+  minutes: number;
+  /** Worth a look, in words. */
+  flags: string[];
+}
+
+export interface EfficiencyReport {
+  cards: CardEfficiency[];
+  totals: { cards: number; sessions: number; restarts: number; steps: number; mcpCalls: number; mcpFailed: number; diagnosticShell: number; refused: number; tokens: { input: number; output: number; cache: number } };
+}
+
+/** Who may use one server on a board. An agent without its own entry gets `default` if it is a worker, else nothing. */
+export interface McpAccess {
+  default: McpLevel;
+  agents: Record<string, McpLevel>;
+}
+
+/** A named set of servers switched on together ("Roblox dev"). */
+export interface McpPreset {
+  name: string;
+  servers: string[];
+}
+
+export interface McpBoardSettings {
+  /** Library ids switched on for this board. */
+  enabled: string[];
+  access: Record<string, McpAccess>;
+  presets: McpPreset[];
+}
+
+/**
+ * How far an agent may use a server on a board. Workers get the server's `default` (full unless set); other roles only
+ * what they are given by name, since planners do not drive tools.
+ */
+export function mcpLevel(settings: Pick<Settings, 'mcp'>, serverId: string, agentId: string, role: CardRole = 'worker'): McpLevel {
+  const m = settings.mcp;
+  if (!m?.enabled.includes(serverId)) return 'off';
+  const a = m.access?.[serverId];
+  const own = a?.agents?.[agentId];
+  if (own && MCP_LEVELS.includes(own)) return own;
+  return role === 'worker' ? (a?.default && MCP_LEVELS.includes(a.default) ? a.default : 'full') : 'off';
+}
+
+/** A tool is a read when the operator says so, else when the server marks it read-only; anything unmarked is a write. */
+export function mcpToolIsRead(entry: Pick<McpLibraryEntry, 'toolKinds'>, tool: Pick<McpToolInfo, 'name' | 'readOnlyHint'>): boolean {
+  const own = entry.toolKinds?.[tool.name];
+  return own ? own === 'read' : tool.readOnlyHint === true;
+}
+
+/** Agents are offered a tool unless the entry names an allowlist that leaves it out. */
+export const mcpToolOffered = (entry: Pick<McpLibraryEntry, 'toolAllow'>, tool: Pick<McpToolInfo, 'name'>): boolean => !entry.toolAllow?.length || entry.toolAllow.includes(tool.name);
+
+export const mcpToolAllowed = (level: McpLevel, entry: Pick<McpLibraryEntry, 'toolKinds' | 'toolAllow'>, tool: Pick<McpToolInfo, 'name' | 'readOnlyHint'>): boolean =>
+  mcpToolOffered(entry, tool) && (level === 'full' || (level === 'read' && mcpToolIsRead(entry, tool)));
+
+/** Problems with the MCP part of settings, checked when they are saved. */
+export function validateMcpSettings(m: McpBoardSettings | undefined): string | null {
+  if (!m) return null;
+  if (!Array.isArray(m.enabled) || m.enabled.some((e) => typeof e !== 'string')) return 'mcp.enabled must be a list of server ids';
+  for (const [id, a] of Object.entries(m.access ?? {})) {
+    if (!MCP_LEVELS.includes(a?.default)) return `mcp access for ${id}: unknown default level`;
+    for (const [agent, level] of Object.entries(a.agents ?? {})) if (!MCP_LEVELS.includes(level)) return `mcp access for ${id}: unknown level "${level}" for ${agent}`;
+  }
+  for (const p of m.presets ?? []) if (!p.name?.trim() || !Array.isArray(p.servers)) return 'each preset needs a name and a list of servers';
+  return null;
+}
+
 /** A skill approved for the board (`propose_skill`): instructions every worker's prompt carries. */
 export interface BoardSkill {
   name: string;
@@ -602,6 +838,14 @@ export interface Settings {
   mcpServers: BoardMcp[];
   /** Skills approved for the board; workers' prompts carry them. */
   skills: BoardSkill[];
+  /** Library servers switched on for the board and who may use them (Phase 9). */
+  mcp: McpBoardSettings;
+  /** Hold cards that need an add-on's servers while its outside half is down (Studio not connected), instead of letting agents discover it step by step. */
+  addonGate: boolean;
+  /** Add-ons switched on for the board (Phase 9). Changed only through the add-on endpoints, which also start and stop their parts. */
+  addons: string[];
+  /** How strongly an agent's notes pull a card toward it: score × (1 + weight × probability), at most ×2 (Phase 9). */
+  noteWeight: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -655,6 +899,10 @@ export const DEFAULT_SETTINGS: Settings = {
   autoApproveSpawn: false,
   mcpServers: [],
   skills: [],
+  mcp: { enabled: [], access: {}, presets: [{ name: 'Roblox dev', servers: ['roblox-studio'] }] },
+  addons: [],
+  addonGate: true,
+  noteWeight: 0.5,
 };
 
 // --- context (master plan §5.7)
@@ -875,12 +1123,17 @@ export type EventType =
   | 'peer.updated'
   | 'request.updated'
   | 'project.updated'
+  | 'mcp.added'
+  | 'mcp.updated'
+  | 'mcp.removed'
+  | 'mcp.call'
+  | 'card.cancelled'
   | 'board.removed';
 
 /** Ephemeral push to UI clients; not stored in the event log. */
 export interface LiveMessage {
   live: true;
-  type: 'pool.status' | 'leases.changed' | 'budget.status' | 'stream.status';
+  type: 'pool.status' | 'leases.changed' | 'budget.status' | 'stream.status' | 'mcp.status' | 'addon.status';
   subject: string;
   payload: unknown;
   ts: string;

@@ -5,6 +5,8 @@
 //   FAIL    → JSON-RPC error            STRICT → a rejected permission ends the turn as cancelled
 //   SLOW    → waits up to 5 s; session/cancel ends the turn as cancelled
 //   CALL <tool> <json>  (one per line) → calls that tool on the session's "board" MCP server
+//   CALL <server>:<tool> <json> → the same on another of the session's MCP servers (e.g. a hub entry)
+//   LISTTOOLS <server> → replies tools=<names the server lists to this session>
 //   CALL[<model>] … / FAIL[<model>] → only when the session runs that model
 //   FAILMSG(<text>)  → the message of a scripted failure (default `scripted failure`)
 //   WHEN(<text>) CALL … → only when the prompt contains <text>
@@ -43,6 +45,7 @@ async function handle(msg) {
         cwd: params.cwd,
         model: 'fake/one',
         mcp: (params.mcpServers ?? []).find((m) => m.name === 'board'),
+        servers: params.mcpServers ?? [],
         dirs: params.additionalDirectories ?? null,
         cancelled: false,
       });
@@ -65,6 +68,7 @@ async function handle(msg) {
         cwd: params.cwd,
         model: 'fake/one',
         mcp: (params.mcpServers ?? []).find((m) => m.name === 'board'),
+        servers: params.mcpServers ?? [],
         dirs: params.additionalDirectories ?? null,
         cancelled: false,
         loaded: true,
@@ -98,10 +102,17 @@ async function handle(msg) {
           update(params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `shell=${answer.outcome?.optionId}\n` } });
           continue;
         }
-        const call = /^(?:WHEN\(([^)]*)\)\s+)?CALL(?:\[([^\]]+)\])? (\w+) (.*)$/.exec(line.trim());
+        const list = /^LISTTOOLS (\S+)$/.exec(line.trim());
+        if (list) {
+          const names = await callBoard((s.servers ?? []).find((m) => m.name === list[1]), '', {}, 'tools/list');
+          update(params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `tools=${names}\n` } });
+          continue;
+        }
+        const call = /^(?:WHEN\(([^)]*)\)\s+)?CALL(?:\[([^\]]+)\])? ([\w.-]+(?::[\w.-]+)?) (.*)$/.exec(line.trim());
         // WHEN markers don't count as prompt text (a prompt may quote a scripted line, marker and all).
         if (!call || (call[1] && !text.replace(/WHEN\([^)]*\)/g, '').includes(call[1])) || (call[2] && call[2] !== s.model)) continue;
-        const result = await callBoard(s.mcp, call[3], JSON.parse(call[4]));
+        const [server, tool] = call[3].includes(':') ? call[3].split(':') : [null, call[3]];
+        const result = await callBoard(server ? (s.servers ?? []).find((m) => m.name === server) : s.mcp, tool, JSON.parse(call[4]));
         update(params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `${call[3]} -> ${result}\n` } });
       }
       // A model-specific failure happens after its board calls, so it can leave notes behind first.
@@ -145,7 +156,7 @@ async function handle(msg) {
 }
 
 /** Minimal MCP client: stateless Streamable HTTP, JSON responses. */
-async function callBoard(server, name, args) {
+async function callBoard(server, name, args, method = 'tools/call') {
   if (!server) return 'no board server';
   const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
   for (const h of server.headers ?? []) headers[h.name] = h.value;
@@ -158,6 +169,7 @@ async function callBoard(server, name, args) {
   };
   await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake', version: '0' } }, 1);
   await rpc('notifications/initialized', {}, undefined);
+  if (method === 'tools/list') return (await rpc('tools/list', {}, 2)).tools.map((t) => t.name).join(',');
   const result = await rpc('tools/call', { name, arguments: args }, 2);
   return `${result.isError ? 'ERROR ' : ''}${result.content.map((c) => c.text).join('')}`.replace(/\s+/g, ' ');
 }

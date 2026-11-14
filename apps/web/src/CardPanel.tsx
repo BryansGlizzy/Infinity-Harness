@@ -918,7 +918,9 @@ export function CardPanel(props: {
         {card.pipeline.finalSummary && (
           <>
             <dt>Final summary</dt>
-            <dd><button className="link" onClick={() => props.onSelect(card.pipeline.finalSummary!.cardId)}>Open the report</button></dd>
+            <dd>
+              {card.pipeline.finalSummary.pending ? 'Being written…' : card.pipeline.finalSummary.cardId === card.id ? 'The last message in Activity; also saved under Context' : <button className="link" onClick={() => props.onSelect(card.pipeline.finalSummary!.cardId)}>Open the report</button>}
+            </dd>
           </>
         )}
         {card.pipeline.summaryOf && (

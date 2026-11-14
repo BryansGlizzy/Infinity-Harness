@@ -21,6 +21,8 @@ import { CouncilRunner } from '../src/council.ts';
 import type { DaemonConfig } from '../src/config.ts';
 import { commitAll, git } from '../src/git.ts';
 import { Live } from '../src/live.ts';
+import { McpHub } from '../src/mcp-hub.ts';
+import { Addons } from '../src/addons.ts';
 import { Runner } from '../src/runner.ts';
 import { Refinery } from '../src/refinery.ts';
 import { Scheduler, lockoutUntil } from '../src/scheduler.ts';
@@ -116,7 +118,14 @@ export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>
   };
   const store = new Store(':memory:');
   const limiter = new RateLimiter();
+  // The MCP hub (Phase 9): tests add servers to its library; nothing starts by itself.
+  const mcp = new McpHub(store, { root: dataDir, env: process.env, port: () => cfg.port, isInstalled: () => true });
+  // Add-ons: tests register their own definitions (a fake sync service) instead of the real Roblox one.
+  const live = new Live();
+  const addons = new Addons({ store, hub: mcp, env: process.env, defs: [], live });
   const runner = new Runner(store, cfg, {
+    mcp,
+    addons,
     isInstalled: opts.installer ? opts.installer.isInstalled : () => false,
     makeAdapter: () => new AcpAgent({ id: 'fake', command: process.execPath, args: [fakeAgent], cwd: dataDir, env: process.env }),
     caps: (boardId) => store.getSettings(boardId),
@@ -127,7 +136,7 @@ export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>
   const bridge = new IdeBridge();
   let federationRef: Federation | null = null;
   const health = new PoolHealth({ store, pools: cfg.pools, upstreams: [], probeHarness: async () => [] });
-  const scheduler = new Scheduler({ store, runner, limiter, pools: cfg.pools, health, kev: opts.kev ?? null, fastLane: opts.lane ?? null, budgets, approvals, tickMs: 100, hold: (card) => federationRef?.holdReason(card) ?? null });
+  const scheduler = new Scheduler({ store, runner, limiter, pools: cfg.pools, health, kev: opts.kev ?? null, fastLane: opts.lane ?? null, budgets, approvals, tickMs: 100, hold: (card) => federationRef?.holdReason(card) ?? null, gate: (card) => addons.holdReason(card) });
   // Not started: tests that race candidates call bestOf.start().
   const bestOf = new BestOf({ store, runner, scheduler, kev: opts.outcomeKev ?? opts.kev ?? null, tickMs: 100 });
   scheduler.setBestOf(bestOf);
@@ -172,7 +181,7 @@ export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>
     federation.port = (fedApp.server.address() as AddressInfo).port;
     federation.start();
   }
-  const app = await buildServer({ store, runner, config: cfg, live: new Live(), limiter, scheduler, context, fastLane: opts.lane ?? null, council, refinery, budgets, approvals, bridge, federation, auth: opts.auth ?? null, health });
+  const app = await buildServer({ store, runner, config: cfg, live, limiter, scheduler, context, fastLane: opts.lane ?? null, council, refinery, budgets, approvals, bridge, federation, auth: opts.auth ?? null, health, mcp, addons });
   await app.listen({ host: '127.0.0.1', port: 0 });
   cfg.port = (app.server.address() as AddressInfo).port;
   const board = store.createBoard({ name: 'Demo', repoPath: repo, defaultBranch: 'main' });
@@ -186,11 +195,13 @@ export async function setup(opts: { installer?: ReturnType<typeof fakeInstaller>
     stopCapture();
     federation?.stop();
     runner.shutdown();
+    await addons.close();
+    await mcp.close();
     await context.idle();
     await app.close();
     await fedApp?.close();
   };
-  return { repo, store, runner, limiter, health, scheduler, refinery, context, council, budgets, approvals, bridge, bestOf, board, cfg, federation, fedUrl, close };
+  return { repo, store, live, mcp, addons, runner, limiter, health, scheduler, refinery, context, council, budgets, approvals, bridge, bestOf, board, cfg, federation, fedUrl, close };
 }
 
 export function waitFor(store: Store, predicate: (e: DaemonEvent) => boolean, ms = 15_000): Promise<DaemonEvent> {

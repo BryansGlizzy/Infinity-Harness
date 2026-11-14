@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod';
 import { readdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { WORK_TYPES, effectiveAgents, renderHandoff, validateAgents, type AgentProfile, type Artifact, type DaemonEvent, type Message } from '@ih/core';
+import { WORK_TYPES, boardNotes, effectiveAgents, mcpLevel, noteKey, renderHandoff, validateAgents, type AgentProfile, type Artifact, type DaemonEvent, type Message } from '@ih/core';
 import type { Store } from '@ih/db';
 import type { ContextService, SearchHit } from '@ih/context';
 import { quickAnswerJob, readQuickAnswer, type FastLane } from '@ih/fast-lane';
@@ -12,6 +12,8 @@ import { planHint, planShape } from './plan-shape.ts';
 import { currentArtifact, lastAgentMessage } from './context.ts';
 import { councilOf, renderProposal } from './council.ts';
 import type { Approvals } from './approvals.ts';
+import type { McpHub } from './mcp-hub.ts';
+import type { Addons } from './addons.ts';
 import type { IdeBridge } from './ide.ts';
 import type { Federation } from './federation/service.ts';
 import { rootOf } from './federation/spend.ts';
@@ -33,6 +35,10 @@ export interface BoardMcpExtras {
   federation?: Federation | null;
   /** Folder with the agent-facing docs (`get_docs`). */
   docsDir?: string;
+  /** The MCP hub (Phase 9): which servers a card can say it needs. */
+  mcp?: McpHub | null;
+  /** Add-ons (Phase 9): `addon_status` reads how an add-on's outside half (Studio's plugins) is doing. */
+  addons?: Addons | null;
 }
 
 /** Kinds agents write with put_artifact; specs and summaries are captured by the daemon, handoffs via write_handoff. */
@@ -73,7 +79,7 @@ function waitForReply(store: Store, from: string, to: string, ms: number): Promi
 
 /** The "board" MCP server every agent session gets (master plan §5.3). Tools act as the calling card. */
 function boardServer(me: RunIdentity, store: Store, runner: Runner, extras: BoardMcpExtras = {}): McpServer {
-  const { context, fastLane, approvals, bridge, federation } = extras;
+  const { context, fastLane, approvals, bridge, federation, addons } = extras;
   const server = new McpServer({ name: 'board', version: '0.1.0' });
   const boardId = me.board.id;
 
@@ -191,9 +197,11 @@ function boardServer(me: RunIdentity, store: Store, runner: Runner, extras: Boar
         delegate: z.boolean().optional().describe('A large chunk for a lead agent to plan further (only when lead agents are on your team)'),
         needs_network: z.boolean().optional().describe('The card installs packages or downloads things from its shell. Agents whose shell has no network (Codex) are skipped.'),
         grants: z.array(z.string()).optional().describe('Tool grants for the card, e.g. "browser" to check a UI in a headless browser. Some wait for a human to approve first.'),
+        needs_mcp: z.array(z.string()).optional().describe('MCP servers (ids from your prompt) the card must use. Only agents the board allows to use them take the card.'),
+        prefers: z.array(z.string()).optional().describe('Agent notes (shown in brackets in your team list, e.g. "UI DEV") this card fits; an agent with one is preferred.'),
       },
     },
-    async ({ title, description, acceptance_criteria, work_type, blocked_by, parent_id, delegate, needs_network, grants }) => {
+    async ({ title, description, acceptance_criteria, work_type, blocked_by, parent_id, delegate, needs_network, grants, needs_mcp, prefers }) => {
       const s = settings();
       if (!s.permissions[myRole()].canCreateCards) return error(`Your role (${myRole()}) may not create cards. Ask the human or the orchestrator.`);
       const council = councilOf(store, store.getCard(me.card.id)!);
@@ -229,10 +237,23 @@ function boardServer(me: RunIdentity, store: Store, runner: Runner, extras: Boar
       const wanted = [...new Set(grants ?? [])];
       const gate = wanted.length ? checkGrants(wanted) : null;
       if (gate && 'error' in gate) return error(gate.error);
+      // MCP servers the card needs: switched on for the board, and at least one agent on the team may use each.
+      const mcpNeeded = [...new Set(needs_mcp ?? [])];
+      for (const id of mcpNeeded) {
+        if (!s.mcp.enabled.includes(id)) return error(`needs_mcp: "${id}" is not switched on for this board. Enabled: ${s.mcp.enabled.join(', ') || 'none'}. Plan without it, or ask the human to switch it on (MCP tab).`);
+        if (!team.some((t) => t.agent.role === role && mcpLevel(s, id, t.agent.id, t.agent.role) !== 'off')) {
+          return error(`needs_mcp: no agent on your team that takes ${role} cards may use "${id}" (MCP tab). Ask the human to allow one, or plan without it.`);
+        }
+      }
+      const wantedNotes = [...new Set((prefers ?? []).map(noteKey).filter(Boolean))];
+      const knownNotes = boardNotes(team.map((t) => t.agent));
+      const unknownNotes = wantedNotes.filter((n) => !knownNotes.includes(n));
+      if (unknownNotes.length) return error(`prefers: no agent on your team carries ${unknownNotes.map((n) => `"${n}"`).join(', ')}. Notes in use: ${knownNotes.join(', ') || 'none'}.`);
       // Children go only to the caller's delegation targets (master plan Phase 3.5); their own children inherit this.
-      // A card with its own rules doesn't inherit its parent's, so needs_network carries them along.
+      // A card with its own rules doesn't inherit its parent's, so needs_network, needs_mcp and prefers carry them along.
       const rules = runner.childRouting(caller);
-      const routing = needs_network ? { ...(rules ?? store.effectiveRouting(parentId) ?? {}), needsNetwork: true } : rules;
+      const extra = { ...(needs_network ? { needsNetwork: true } : {}), ...(mcpNeeded.length ? { needsMcp: mcpNeeded } : {}), ...(wantedNotes.length ? { prefers: wantedNotes } : {}) };
+      const routing = Object.keys(extra).length ? { ...(rules ?? store.effectiveRouting(parentId) ?? {}), ...extra } : rules;
       // Created in Backlog and moved to Ready only once its dependencies exist, so it can't start too early.
       const card = store.createCard({
         boardId,
@@ -551,6 +572,67 @@ function boardServer(me: RunIdentity, store: Store, runner: Runner, extras: Boar
         const a = context ? context.put(input) : store.putArtifact(input);
         const missing = ids.filter((id) => !shares.some((s) => s.member === id));
         return text({ saved: a.id, note: missing.length ? `No share for ${missing.join(', ')}: they will create no cards if this proposal wins.` : undefined });
+      },
+    );
+  }
+
+  server.registerTool(
+    'ask_parent',
+    {
+      description:
+        'You are stuck, or something outside your worktree is broken (an app, a server, a tool that is down): ask the agent that planned your card, once, instead of spending steps diagnosing it. Say what you tried and what you need. It can answer, change your card, or tell the human; if it is not available the human is told.',
+      inputSchema: {
+        question: z.string().min(3).describe('What you need to know or decide'),
+        tried: z.string().optional().describe('What you already tried, in a sentence or two'),
+        timeout_seconds: z.number().int().min(10).max(ASK_TIMEOUT_MAX).optional().describe(`How long to wait for the reply (default ${ASK_TIMEOUT_DEFAULT})`),
+      },
+    },
+    async ({ question, tried, timeout_seconds }) => {
+      const mine = store.getCard(me.card.id)!;
+      const parent = mine.parentId ? store.getCard(mine.parentId) : undefined;
+      const detail = `${question}${tried ? `\nWhat it tried: ${tried}` : ''}`;
+      const tellHuman = (why: string) =>
+        store.postMessage({ boardId, fromActor: `card:${me.card.id}`, toCard: null, body: `Card "${mine.title}" (${mine.id}) is stuck and ${why}:\n${detail}`, urgent: false });
+      if (!parent || parent.boardId !== boardId) {
+        tellHuman('has no planner to ask');
+        return text({ answered: false, note: 'Your card has no planner above it, so the human was told. Carry on with what you can, or call report_blocked.' });
+      }
+      const body = `Your child card ${mine.id} "${mine.title}" is stuck and asks: ${detail}\n(Answer with post_message to "${mine.id}". You can also change its card with update_subtask, or tell the human with post_message to="human".)`;
+      const send = () => store.postMessage({ boardId, fromActor: `card:${me.card.id}`, toCard: parent.id, body, urgent: false });
+      if (runner.sessionState(parent.id) === 'idle') {
+        const wait = (timeout_seconds ?? ASK_TIMEOUT_DEFAULT) * 1000;
+        const reply = waitForReply(store, parent.id, me.card.id, wait);
+        send();
+        runner.deliver(parent.id);
+        const m = await reply;
+        if (!m) {
+          tellHuman(`its planner did not answer within ${wait / 1000}s`);
+          return text({ answered: false, note: `No reply within ${wait / 1000}s; the human was told and the answer will reach your inbox (read_inbox). Carry on with what you can, or call report_blocked.` });
+        }
+        store.markDelivered([m.id]);
+        return text({ answered: true, from: `card ${parent.id}`, answer: m.body });
+      }
+      // The planner is busy or finished: the question waits in its inbox, and the human is told so nobody waits on a closed session.
+      send();
+      runner.deliver(parent.id);
+      tellHuman('its planner is not available right now');
+      return text({ answered: false, note: 'Your planner is busy or finished, so the question waits in its inbox and the human was told. Carry on with what you can, or call report_blocked.' });
+    },
+  );
+
+  if (addons && settings().addons.length) {
+    server.registerTool(
+      'addon_status',
+      {
+        description: 'How the outside half of this board\'s add-ons is doing right now (Roblox: whether Studio\'s plugins are connected). Call it once when a tool fails or Studio looks disconnected, instead of probing the machine.',
+      },
+      async () => {
+        const out = [];
+        for (const id of settings().addons) {
+          const st = await addons.status(boardId, id);
+          out.push({ addon: id, ready: st?.ready ?? null, parts: st?.parts ?? [], advice: st?.advice ?? 'its state could not be read' });
+        }
+        return text(out);
       },
     );
   }

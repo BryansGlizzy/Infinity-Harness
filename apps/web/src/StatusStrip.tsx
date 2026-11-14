@@ -4,6 +4,7 @@ import type { PoolWithStatus } from './api.ts';
 import { ApprovalsPanel } from './ApprovalsPanel.tsx';
 import { WeighButtons } from './CardPanel.tsx';
 import { messageTarget, type MessageTarget } from './messageTarget.ts';
+import type { LinkSummary } from './addonLink.ts';
 
 const WINDOW_LABEL: Record<string, string> = {
   rpm: 'req/min',
@@ -14,6 +15,32 @@ const WINDOW_LABEL: Record<string, string> = {
   '7d': 'weekly',
   forced: 'forced',
 };
+
+/** A chain link: joined when everything is connected, broken when something is not, drawn dashed while it is not known. */
+function LinkIcon({ state }: { state: LinkSummary['state'] }) {
+  return (
+    <svg className="link-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9 7H6a5 5 0 0 0 0 10h3" strokeDasharray={state === 'unknown' ? '2.5 3' : undefined} />
+      <path d="M15 7h3a5 5 0 0 1 0 10h-3" strokeDasharray={state === 'unknown' ? '2.5 3' : undefined} />
+      {state === 'ok' && <path d="M8 12h8" />}
+    </svg>
+  );
+}
+
+/** One add-on's link to the outside world (Roblox: Studio's plugins and the sync), live. Click opens the MCP tab. */
+function LinkChip({ link, stale, onClick }: { link: LinkSummary; stale: boolean; onClick?: () => void }) {
+  const word = link.state === 'ok' ? 'connected' : link.state === 'bad' ? 'not connected' : 'checking…';
+  const title = [`${link.label}: ${word}${stale ? ' (the page lost its live connection to the daemon, so this may be out of date)' : ''}`, ...link.parts.map((p) => `• ${p.label}: ${p.detail}`), ...(link.advice ? ['', link.advice] : [])].join('\n');
+  return (
+    <button className={`chip link ${link.state} ${stale ? 'stale' : ''}`} onClick={onClick} title={title} aria-label={`${link.label} link: ${word}`}>
+      <LinkIcon state={link.state} />
+      <span>{link.label}</span>
+      {link.parts.map((p) => (
+        <span key={p.id} className={`part ${p.state}`}><span className="dot" aria-hidden="true" />{p.label}</span>
+      ))}
+    </button>
+  );
+}
 
 function PoolChip({ pool }: { pool: PoolWithStatus }) {
   const { status } = pool;
@@ -58,6 +85,10 @@ export function StatusStrip(props: {
   approvals: Approval[];
   /** Swarms knocking and peer requests waiting for a decision (Phase 7). */
   swarmWaiting?: number;
+  /** Add-on links to watch (Roblox: Studio's plugins and the sync), and whether the page has lost its live connection. */
+  links?: LinkSummary[];
+  linksStale?: boolean;
+  onOpenMcp?: () => void;
   onOpenSwarms?: () => void;
   onOpenAgents?: () => void;
   /** Opens a settings tab (a message about a setting goes straight there). */
@@ -108,6 +139,12 @@ export function StatusStrip(props: {
     <div className="strip" ref={stripRef}>
       <span className="label">Pools</span>
       {props.pools.map((p) => <PoolChip key={p.id} pool={p} />)}
+      {!!props.links?.length && (
+        <>
+          <span className="label">Links</span>
+          {props.links.map((l) => <LinkChip key={l.id} link={l} stale={!!props.linksStale} onClick={props.onOpenMcp} />)}
+        </>
+      )}
       <span className="label">Leases</span>
       {props.leases.length === 0 && <span className="muted">none</span>}
       {props.leases.map((l) => (

@@ -1,5 +1,40 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { EfficiencyReport } from '@ih/core';
 import { api, type BudgetStatus, type MetricsReport, type UsageSum } from './api.ts';
+
+/** Where each card's effort went: steps, failed MCP calls, restarts, refused calls, tokens. A flag says what looks wasteful. */
+function Efficiency({ boardId, onSelect, onError }: { boardId: string; onSelect: (id: string) => void; onError: (m: string) => void }) {
+  const [data, setData] = useState<EfficiencyReport | null>(null);
+  useEffect(() => {
+    const load = () => void api.efficiency(boardId).then(setData, (e: Error) => onError(e.message));
+    load();
+    const t = setInterval(load, 20_000);
+    return () => clearInterval(t);
+  }, [boardId]);
+  if (!data || !data.cards.length) return null;
+  const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+  return (
+    <section>
+      <h3>Where the effort went</h3>
+      <p className="muted small">Per card, from its event log. Steps are tool calls; <em>probing</em> are calls that only ask whether the other side is there; <em>diagnosing</em> are shell commands that read the machine; <em>refused</em> are calls the path policy stopped. Counts are approximate.</p>
+      <div className="table-scroll surface-box">
+        <table className="pools-table">
+          <thead><tr><th>Card</th><th>Agent</th><th>Min</th><th>Steps</th><th>Starts</th><th>MCP failed/calls</th><th>Probing</th><th>Diagnosing</th><th>Refused</th><th>Tokens in/out (cache)</th></tr></thead>
+          <tbody>
+            {data.cards.map((c) => (
+              <tr key={c.id} className={c.flags.length ? 'has-flags' : ''}>
+                <td><button className="link" onClick={() => onSelect(c.id)}>{c.title.slice(0, 46)}</button>{c.flags.length > 0 && <div className="error-text small">{c.flags.join('; ')}</div>}</td>
+                <td>{c.agent ?? '-'}</td><td>{c.minutes}</td><td>{c.steps}</td><td>{c.sessions}{c.cancels.length ? ` (cancelled by ${c.cancels.map((x) => `${x.by.replace('user:', '')}×${x.n}`).join(', ')})` : ''}</td>
+                <td>{c.mcp.failed}/{c.mcp.calls}</td><td>{c.mcp.probes}</td><td>{c.diagnosticShell}</td><td>{c.refused}</td>
+                <td>{k(c.tokens.input)} / {k(c.tokens.output)} ({k(c.tokens.cache)})</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
 
 const RANGES = [
   { hours: 1, label: '1 hour' },
@@ -124,6 +159,8 @@ export function MetricsView(props: { boardId: string; onSelect: (cardId: string)
           {RANGES.map((r) => <button key={r.hours} className={hours === r.hours ? 'on' : ''} aria-current={hours === r.hours ? 'true' : undefined} onClick={() => setHours(r.hours)}>{r.label}</button>)}
         </nav>
       </div>
+
+      <Efficiency boardId={boardId} onSelect={props.onSelect} onError={onError} />
 
       {!data && <p className="muted">Loading…</p>}
       {data && (
